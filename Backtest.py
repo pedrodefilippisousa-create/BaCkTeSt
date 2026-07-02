@@ -81,6 +81,8 @@ THEME = dict(
     plot_bgcolor="#161B22",
     font_color="#E6EDF3",
     font_family="Inter, Arial, sans-serif",
+    font_size=13,
+    title_font_size=18,
 )
 
 
@@ -284,7 +286,7 @@ def fig_equity_periods(prices, w_ini, w_opt, tickers):
                 hovertemplate="%{x|%d/%m/%Y}<br>%{y:.1f}%<extra>" + style["name"] + "</extra>",
             ), row=r, col=c)
     fig.update_layout(title=f"Curvas de Equity por Período (base {BASE_CURRENCY})",
-                      **THEME, height=600,
+                      **THEME, height=600, hovermode="x unified",
                       legend=dict(bgcolor="#161B22", bordercolor="#2D3748"))
     fig.update_xaxes(gridcolor=COLORS["grid"])
     fig.update_yaxes(gridcolor=COLORS["grid"], ticksuffix="%")
@@ -312,8 +314,9 @@ def fig_drawdown(prices, w_ini, w_opt, tickers):
             hovertemplate="%{x|%d/%m/%Y}<br>%{y:.2f}%<extra>" + name + "</extra>",
         ))
     fig.update_layout(title="Drawdown — Últimos 12 Meses", yaxis_title="Drawdown (%)",
-        **THEME, height=350, legend=dict(bgcolor="#161B22", bordercolor="#2D3748"),
-        xaxis=dict(gridcolor=COLORS["grid"]), yaxis=dict(gridcolor=COLORS["grid"]))
+        **THEME, height=350, hovermode="x unified",
+        legend=dict(bgcolor="#161B22", bordercolor="#2D3748"),
+        xaxis=dict(gridcolor=COLORS["grid"]), yaxis=dict(gridcolor=COLORS["grid"], ticksuffix="%"))
     return fig
 
 
@@ -343,18 +346,30 @@ def fig_rolling_sharpe(prices, w_ini, w_opt, tickers):
 
 
 def fig_correlation(prices, tickers):
-    corr = prices[tickers].pct_change().dropna().corr()
+    # agrupa BR (.SA) primeiro, depois US, para os blocos aparecerem juntos
+    ordered = [t for t in tickers if t.endswith(".SA")] + [t for t in tickers if not t.endswith(".SA")]
+    corr = prices[ordered].pct_change().dropna().corr()
+    labels = [f"{t} 🇧🇷" if t.endswith(".SA") else f"{t} 🇺🇸" for t in ordered]
     fig = go.Figure(go.Heatmap(
-        z=corr.values, x=tickers, y=tickers,
+        z=corr.values, x=labels, y=labels,
         colorscale=[[0,"#EF5350"],[0.5,"#161B22"],[1,"#26A69A"]],
         zmin=-1, zmax=1,
         text=[[f"{v:.2f}" for v in row] for row in corr.values],
         texttemplate="%{text}", textfont=dict(size=11),
+        colorbar=dict(title=dict(text="Correlação", font=dict(color="#E6EDF3")),
+                      tickfont=dict(color="#E6EDF3")),
         hovertemplate="%{y} × %{x}<br>Correlação: %{z:.2f}<extra></extra>",
     ))
-    fig.update_layout(title="Matriz de Correlação", **THEME, height=460,
-        xaxis=dict(tickfont=dict(color="#E6EDF3")),
-        yaxis=dict(tickfont=dict(color="#E6EDF3")))
+    # linha separando o bloco BR do bloco US
+    n_br = sum(t.endswith(".SA") for t in ordered)
+    if 0 < n_br < len(ordered):
+        pos = n_br - 0.5
+        line = dict(color="#FF6F00", width=2)
+        fig.add_vline(x=pos, line=line)
+        fig.add_hline(y=pos, line=line)
+    fig.update_layout(title="Matriz de Correlação (🇧🇷 agrupadas, depois 🇺🇸)", **THEME, height=480,
+        xaxis=dict(tickfont=dict(color="#E6EDF3"), tickangle=-45),
+        yaxis=dict(tickfont=dict(color="#E6EDF3"), autorange="reversed"))
     return fig
 
 

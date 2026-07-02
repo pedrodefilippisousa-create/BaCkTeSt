@@ -435,24 +435,83 @@ def fig_metrics_table(metrics_df):
     return fig
 
 
-def fig_individual_assets(prices, tickers):
+def fig_individual_assets(prices, tickers, titulo=None):
     p = prices.loc[datetime.today() - PERIODS["1A"]:]
     fig = go.Figure()
     palette = px.colors.qualitative.Plotly + px.colors.qualitative.Bold
-    for i, t in enumerate(tickers):
+    # ordena por retorno no período (melhor -> pior) p/ leitura mais didática
+    finais = []
+    for t in tickers:
         if t not in p.columns:
             continue
         cum = (cumulative(p[t].pct_change().dropna()) - 1) * 100
-        fig.add_trace(go.Scatter(x=cum.index, y=cum.values, mode="lines", name=t,
+        finais.append((t, cum))
+    finais.sort(key=lambda x: x[1].iloc[-1] if len(x[1]) else 0, reverse=True)
+    for i, (t, cum) in enumerate(finais):
+        fim = cum.iloc[-1] if len(cum) else 0
+        fig.add_trace(go.Scatter(x=cum.index, y=cum.values, mode="lines",
+            name=f"{t}  ({fim:+.0f}%)",
             line=dict(color=palette[i % len(palette)], width=1.8),
             hovertemplate="%{x|%d/%m/%Y}<br>%{y:.1f}%<extra>" + t + "</extra>"))
-    fig.add_hline(y=0, line_color=COLORS["grid"])
-    fig.update_layout(title=f"Performance Individual dos Ativos — Últimos 12 Meses (base {BASE_CURRENCY})",
-        yaxis_title="Retorno (%)", **THEME, height=420,
-        legend=dict(bgcolor="#161B22", bordercolor="#2D3748"),
+    fig.add_hline(y=0, line_color=COLORS["grid"], line_width=1.5)
+    fig.update_layout(
+        title=titulo or f"Performance Individual dos Ativos — Últimos 12 Meses (base {BASE_CURRENCY})",
+        yaxis_title="Retorno acumulado (%)", **THEME, height=440,
+        legend=dict(bgcolor="#161B22", bordercolor="#2D3748", font=dict(size=12)),
+        hovermode="x unified",
         xaxis=dict(gridcolor=COLORS["grid"]),
-        yaxis=dict(gridcolor=COLORS["grid"], ticksuffix="%"))
+        yaxis=dict(gridcolor=COLORS["grid"], ticksuffix="%", zeroline=False))
     return fig
+
+
+def _group_indices(tickers):
+    """Índices dos ativos BR (.SA) e US dentro da lista de tickers."""
+    br = [i for i, t in enumerate(tickers) if t.endswith(".SA")]
+    us = [i for i, t in enumerate(tickers) if not t.endswith(".SA")]
+    return br, us
+
+
+def subportfolio_returns(prices, tickers, weights, idxs):
+    """Retornos diários de um sub-conjunto de ativos, com pesos renormalizados."""
+    if not idxs:
+        return None
+    sub_t = [tickers[i] for i in idxs]
+    sub_w = np.array([weights[i] for i in idxs], dtype=float)
+    if sub_w.sum() <= 0:
+        sub_w = np.ones(len(idxs))
+    sub_w = sub_w / sub_w.sum()
+    return portfolio_returns(prices, sub_w, sub_t)
+
+
+def build_group_stats(prices, tickers, w_ini, period="1A"):
+    """Rentabilidade/risco das ações BR, US e da carteira completa (mesmo período)."""
+    delta = PERIODS.get(period, PERIODS["1A"])
+    p = prices.loc[datetime.today() - delta:]
+    br_idx, us_idx = _group_indices(tickers)
+    groups = [
+        ("🇧🇷 Ações brasileiras", br_idx),
+        ("🇺🇸 Ações americanas", us_idx),
+        ("🧺 Carteira completa", list(range(len(tickers)))),
+    ]
+    rows = []
+    for name, idx in groups:
+        if not idx:
+            continue
+        pr = subportfolio_returns(p, tickers, w_ini, idx)
+        if pr is None or len(pr) < 5:
+            continue
+        cum = cumulative(pr)
+        a_r, a_v, sh = annualized_stats(pr)
+        rows.append({
+            "grupo": name,
+            "n": len(idx),
+            "retorno_total": cum.iloc[-1] - 1,
+            "retorno_anual": a_r,
+            "volatilidade": a_v,
+            "sharpe": sh,
+            "max_drawdown": max_drawdown(cum),
+        })
+    return rows
 
 
 PERIOD_LABELS = {"6M": "6 meses", "1A": "1 ano", "3A": "3 anos",
@@ -477,6 +536,12 @@ CHART_INTROS = {
     "assets": ("Performance Individual dos Ativos — Últimos 12 Meses",
         "Retorno de cada ativo isoladamente no último ano, em BRL. Útil para identificar quais posições "
         "puxaram o resultado da carteira para cima ou para baixo."),
+    "assets_br": ("🇧🇷 Ações Brasileiras — Últimos 12 Meses",
+        "Retorno acumulado de cada ação brasileira (.SA) no último ano, em BRL, ordenado da melhor "
+        "para a pior. Passe o mouse para ver o valor em cada data."),
+    "assets_us": ("🇺🇸 Ações Americanas — Últimos 12 Meses",
+        "Retorno acumulado de cada ação americana no último ano, já convertido para BRL, ordenado da "
+        "melhor para a pior. A conversão cambial (USD→BRL) afeta esses números."),
     "drawdown": ("Drawdown — Últimos 12 Meses",
         "Queda percentual em relação ao topo histórico mais recente (pico-a-vale). Quanto mais negativo "
         "e prolongado, maior o risco de perda e o tempo de recuperação."),
@@ -494,7 +559,8 @@ CHART_INTROS = {
 # Rótulo curto de cada gráfico no menu de navegação (chave = id do fig)
 NAV_LABELS = {
     "frontier": "Fronteira Eficiente", "allocation": "Alocação", "equity": "Equity",
-    "bar_returns": "Retorno/Período", "assets": "Ativos", "drawdown": "Drawdown",
+    "bar_returns": "Retorno/Período", "assets": "Ativos",
+    "assets_br": "Ativos BR", "assets_us": "Ativos US", "drawdown": "Drawdown",
     "rolling_sharpe": "Rolling Sharpe", "correlation": "Correlação", "metrics_table": "Métricas",
 }
 
@@ -552,9 +618,11 @@ def build_period_summary(prices, w_ini, w_opt, tickers):
     return rows
 
 
-def build_nav(fig_keys):
+def build_nav(fig_keys, has_groups=False):
     links = ['<a href="#resumo">Resumo</a>',
              '<a href="#tabela-alocacao">Alocação Ótima</a>']
+    if has_groups:
+        links.append('<a href="#grupos">Brasil × EUA</a>')
     links += [f'<a href="#fig-{k}">{NAV_LABELS.get(k, k)}</a>' for k in fig_keys]
     links.append('<a href="#glossario">Glossário</a>')
     return ('<nav class="toc" aria-label="Navegação do relatório">\n  '
@@ -628,7 +696,47 @@ def build_summary_section(summary_rows, tickers, w_opt):
 </section>"""
 
 
-def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics_df, summary_rows):
+def build_group_section(prices, tickers, w_ini, period="1A"):
+    """Seção HTML comparando ações BR, US e a carteira completa (rentab./risco)."""
+    rows = build_group_stats(prices, tickers, w_ini, period)
+    if not rows:
+        return ""
+    periodo_txt = PERIOD_LABELS.get(period, period)
+    best_ret = max(r["retorno_total"] for r in rows)
+    body = ""
+    for r in rows:
+        destaque = ' style="color:#26A69A"' if abs(r["retorno_total"] - best_ret) < 1e-12 else ""
+        sh_color = "#26A69A" if r["sharpe"] >= 1 else ("#FFA726" if r["sharpe"] >= 0 else "#EF5350")
+        body += f"""
+      <tr>
+        <td style="text-align:left"><b>{r['grupo']}</b> <span class="mini">{r['n']} ativos</span></td>
+        <td{destaque}><b>{_pct(r['retorno_total'])}</b></td>
+        <td>{_pct(r['retorno_anual'])}</td>
+        <td>{_pct(r['volatilidade'], signed=False)}</td>
+        <td style="color:{sh_color}"><b>{r['sharpe']:.2f}</b></td>
+        <td style="color:#EF5350">{_pct(r['max_drawdown'])}</td>
+      </tr>"""
+    return f"""<section class="summary-section" id="grupos">
+  <h2>Brasil × Estados Unidos × Carteira Completa</h2>
+  <p>Comparação da fatia <b>brasileira</b>, da fatia <b>americana</b> e da <b>carteira completa</b> nos
+  últimos {periodo_txt} (pesos iniciais renormalizados dentro de cada grupo). Ajuda a ver de onde vem o
+  retorno e o risco — e o efeito da diversificação entre países ao juntar as duas.</p>
+  <table class="summary-table">
+    <thead><tr>
+      <th style="text-align:left">Grupo</th><th>Retorno Total</th><th>Retorno Anualiz.</th>
+      <th>Volatilidade</th><th>Sharpe</th><th>Máx. Drawdown</th>
+    </tr></thead>
+    <tbody>{body}
+    </tbody>
+  </table>
+  <p class="summary-note">Sharpe em verde = acima de 1 (boa relação risco-retorno); laranja = entre 0 e 1;
+  vermelho = negativo. A "carteira completa" costuma ter volatilidade menor que a média das partes graças
+  à diversificação.</p>
+</section>"""
+
+
+def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics_df, summary_rows,
+               group_html=""):
     ms_r, ms_v, ms_s = mkt["max_sharpe"]["stats"]
     mv_r, mv_v, _    = mkt["min_vol"]["stats"]
     alloc_rows = ""
@@ -664,7 +772,7 @@ def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics
         f'<div id="fig-{k}" class="chart-wrap">{v}</div></section>'
         for k, v in figures_html.items()
     )
-    nav_toc       = build_nav(list(figures_html.keys()))
+    nav_toc       = build_nav(list(figures_html.keys()), has_groups=bool(group_html))
     summary_html  = build_summary_section(summary_rows, tickers, w_opt)
     glossary_html = build_glossary()
     back_to_top   = BACK_TO_TOP
@@ -762,6 +870,7 @@ def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics
       <tbody>{alloc_rows}</tbody>
     </table>
   </div>
+  {group_html}
   {sections}
 </div>
 {glossary_html}
@@ -818,24 +927,39 @@ def main():
     summary_rows = build_period_summary(prices, w_ini, w_opt, tickers)
 
     print("[4/5] Gerando gráficos...")
+    br_tickers = [t for t in tickers if t.endswith(".SA")]
+    us_tickers = [t for t in tickers if not t.endswith(".SA")]
+
     figs = {
         "frontier":       fig_frontier(mkt, prices, w_ini, w_opt, tickers),
         "allocation":     fig_allocation_pie(tickers, w_ini, w_opt),
         "equity":         fig_equity_periods(prices, w_ini, w_opt, tickers),
         "bar_returns":    fig_bar_returns(metrics_df),
-        "assets":         fig_individual_assets(prices, tickers),
+    }
+    # Separa a performance individual por país (BR / US); se só houver um grupo,
+    # mantém um único gráfico combinado.
+    if br_tickers and us_tickers:
+        figs["assets_br"] = fig_individual_assets(
+            prices, br_tickers, "🇧🇷 Ações Brasileiras — Últimos 12 Meses (base BRL)")
+        figs["assets_us"] = fig_individual_assets(
+            prices, us_tickers, "🇺🇸 Ações Americanas — Últimos 12 Meses (base BRL)")
+    else:
+        figs["assets"] = fig_individual_assets(prices, tickers)
+    figs.update({
         "drawdown":       fig_drawdown(prices, w_ini, w_opt, tickers),
         "rolling_sharpe": fig_rolling_sharpe(prices, w_ini, w_opt, tickers),
         "correlation":    fig_correlation(prices, tickers),
         "metrics_table":  fig_metrics_table(metrics_df),
-    }
+    })
+    group_html = build_group_section(prices, tickers, w_ini, period="1A")
     figs_html = {k: v.to_html(full_html=False,
                                include_plotlyjs="cdn" if k == list(figs.keys())[0] else False,
                                config={"responsive": True, "displayModeBar": True})
                  for k, v in figs.items()}
 
     print("[5/5] Montando HTML...")
-    html = build_html(figs_html, PORTFOLIO_NAME, tickers, w_ini, w_opt, mkt, metrics_df, summary_rows)
+    html = build_html(figs_html, PORTFOLIO_NAME, tickers, w_ini, w_opt, mkt, metrics_df,
+                      summary_rows, group_html=group_html)
     safe_name = PORTFOLIO_NAME.replace(" ", "_").replace("/", "-")
     out_path  = os.path.join(OUTPUT_DIR, f"portfolio_{safe_name}.html")
     with open(out_path, "w", encoding="utf-8") as f:

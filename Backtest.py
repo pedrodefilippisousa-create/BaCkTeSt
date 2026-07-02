@@ -634,9 +634,11 @@ def build_period_summary(prices, w_ini, w_opt, tickers):
     return rows
 
 
-def build_nav(fig_keys, has_groups=False, has_sim=False):
-    links = ['<a href="#resumo">Resumo</a>',
-             '<a href="#tabela-alocacao">Alocação Ótima</a>']
+def build_nav(fig_keys, has_groups=False, has_sim=False, has_quotes=False):
+    links = ['<a href="#resumo">Resumo</a>']
+    if has_quotes:
+        links.append('<a href="#cotacoes">💰 Cotações</a>')
+    links.append('<a href="#tabela-alocacao">Alocação Ótima</a>')
     if has_groups:
         links.append('<a href="#grupos">Brasil × EUA</a>')
     if has_sim:
@@ -711,6 +713,90 @@ def build_summary_section(summary_rows, tickers, w_opt):
   </table>
   <p class="summary-note">Retornos acumulados extraídos das curvas de equity da seção "Curvas de Equity
   por Período" abaixo.{caveat}</p>
+</section>"""
+
+
+def _money(v, cur):
+    """Formata valor monetário em pt-BR: US$ 1.234,56 / R$ 32,45."""
+    s = f"{v:,.2f}".replace(",", "\x00").replace(".", ",").replace("\x00", ".")
+    return f"{cur} {s}"
+
+
+def fetch_native_prices(tickers, days=400):
+    """Baixa os preços de fechamento em moeda NATIVA (sem conversão FX) p/ a tabela de cotações."""
+    start = datetime.today() - timedelta(days=days)
+    data = yf.download(list(dict.fromkeys(tickers)), start=start,
+                       progress=False, auto_adjust=False)
+    if "Close" in getattr(data, "columns", []):
+        close = data["Close"]
+    elif isinstance(data.columns, pd.MultiIndex):
+        close = data["Close"]
+    else:
+        close = data.to_frame()
+    return close.dropna(how="all")
+
+
+def compute_quotes(native_prices, tickers):
+    """Preço atual e máx/mín de 52 semanas (moeda nativa) de cada ticker."""
+    rows = []
+    corte = datetime.today() - timedelta(days=365)
+    for t in tickers:
+        if t not in native_prices.columns:
+            continue
+        s = native_prices[t].dropna()
+        if s.empty:
+            continue
+        janela = s.loc[corte:]
+        if janela.empty:
+            janela = s
+        last = float(s.iloc[-1])
+        hi, lo = float(janela.max()), float(janela.min())
+        pos = (last - lo) / (hi - lo) if hi > lo else 0.5
+        rows.append({
+            "ticker": t,
+            "origem": "BR" if t.endswith(".SA") else "US",
+            "moeda": "R$" if t.endswith(".SA") else "US$",
+            "atual": last, "min52": lo, "max52": hi,
+            "pos": max(0.0, min(1.0, pos)),
+            "vs_max": last / hi - 1 if hi else 0.0,
+        })
+    return rows
+
+
+def build_quotes_section(rows):
+    """Seção HTML com preço atual + faixa de 52 semanas (com barra de posição)."""
+    if not rows:
+        return ""
+    body = ""
+    for r in rows:
+        posp = r["pos"] * 100
+        body += f"""
+      <tr>
+        <td style="text-align:left"><b>{r['ticker']}</b> <span class="mini">{r['origem']}</span></td>
+        <td><b>{_money(r['atual'], r['moeda'])}</b></td>
+        <td>{_money(r['min52'], r['moeda'])}</td>
+        <td>{_money(r['max52'], r['moeda'])}</td>
+        <td class="range-cell">
+          <div class="range-bar"><div class="range-dot" style="left:{posp:.0f}%"></div></div>
+          <span class="range-txt">{posp:.0f}% da faixa · {_pct(r['vs_max'])} vs. máx</span>
+        </td>
+      </tr>"""
+    return f"""<section class="summary-section" id="cotacoes">
+  <h2>💰 Cotações — Preço Atual e Faixa de 52 Semanas</h2>
+  <p>Preço de fechamento mais recente de cada ativo, na moeda nativa (🇧🇷 R$, 🇺🇸 US$), com a
+  <b>máxima e a mínima dos últimos 12 meses</b>. A barra mostra onde o preço atual está dentro dessa
+  faixa: à <span style="color:#EF5350">esquerda (vermelho)</span> = perto da mínima;
+  à <span style="color:#26A69A">direita (verde)</span> = perto da máxima.</p>
+  <table class="summary-table">
+    <thead><tr>
+      <th style="text-align:left">Ativo</th><th>Preço Atual</th><th>Mín. 52s</th><th>Máx. 52s</th>
+      <th style="text-align:left">Posição na faixa (52 semanas)</th>
+    </tr></thead>
+    <tbody>{body}
+    </tbody>
+  </table>
+  <p class="summary-note">Atualizado a cada execução do <code>Backtest.py</code>. "vs. máx" = variação em
+  relação à máxima de 52 semanas (quanto o preço está abaixo do topo do período).</p>
 </section>"""
 
 
@@ -950,7 +1036,7 @@ def build_simulator(prices, tickers, w_ini, w_opt):
 
 
 def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics_df, summary_rows,
-               group_html="", simulator_html=""):
+               group_html="", simulator_html="", quotes_html=""):
     ms_r, ms_v, ms_s = mkt["max_sharpe"]["stats"]
     mv_r, mv_v, _    = mkt["min_vol"]["stats"]
     alloc_rows = ""
@@ -987,7 +1073,7 @@ def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics
         for k, v in figures_html.items()
     )
     nav_toc       = build_nav(list(figures_html.keys()), has_groups=bool(group_html),
-                              has_sim=bool(simulator_html))
+                              has_sim=bool(simulator_html), has_quotes=bool(quotes_html))
     summary_html  = build_summary_section(summary_rows, tickers, w_opt)
     glossary_html = build_glossary()
     back_to_top   = BACK_TO_TOP
@@ -1041,6 +1127,12 @@ def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics
   .summary-note{{color:#8B949E;font-size:.75rem;margin-top:10px}}
   .summary-section code{{background:#0D1117;border:1px solid #2D3748;border-radius:4px;
                          padding:1px 5px;font-size:.85em;color:#FFA726}}
+  .range-cell{{min-width:180px;text-align:left}}
+  .range-bar{{position:relative;height:8px;border-radius:4px;margin:2px 0 4px;
+              background:linear-gradient(90deg,#EF5350 0%,#FFA726 50%,#26A69A 100%)}}
+  .range-dot{{position:absolute;top:-3px;width:4px;height:14px;background:#E6EDF3;border-radius:2px;
+              transform:translateX(-50%);box-shadow:0 0 3px rgba(0,0,0,.6)}}
+  .range-txt{{font-size:.72rem;color:#8B949E}}
   .sim-periods{{display:flex;align-items:center;gap:6px;color:#8B949E;font-size:.8rem;flex-wrap:wrap}}
   .sim-periods button{{background:#21262D;color:#8B949E;border:1px solid #2D3748;border-radius:14px;
                        padding:4px 14px;cursor:pointer;font-size:.8rem;transition:.15s}}
@@ -1106,6 +1198,7 @@ def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics
 {nav_toc}
 {summary_html}
   {summary_cards}
+  {quotes_html}
   <div class="alloc-section" id="tabela-alocacao">
     <h2>Alocação Ótima — Markowitz (Max Sharpe)</h2>
     <table>
@@ -1197,6 +1290,13 @@ def main():
     })
     group_html     = build_group_section(prices, tickers, w_ini, period="1A")
     simulator_html = build_simulator(prices, tickers, w_ini, w_opt)
+    print("  buscando cotações (preço atual + 52 semanas)...")
+    try:
+        native = fetch_native_prices(tickers)
+        quotes_html = build_quotes_section(compute_quotes(native, tickers))
+    except Exception as e:
+        print(f"  ⚠ não consegui montar a tabela de cotações: {e}")
+        quotes_html = ""
     figs_html = {k: v.to_html(full_html=False,
                                include_plotlyjs="cdn" if k == list(figs.keys())[0] else False,
                                config={"responsive": True, "displayModeBar": True})
@@ -1204,7 +1304,8 @@ def main():
 
     print("[5/5] Montando HTML...")
     html = build_html(figs_html, PORTFOLIO_NAME, tickers, w_ini, w_opt, mkt, metrics_df,
-                      summary_rows, group_html=group_html, simulator_html=simulator_html)
+                      summary_rows, group_html=group_html, simulator_html=simulator_html,
+                      quotes_html=quotes_html)
     safe_name = PORTFOLIO_NAME.replace(" ", "_").replace("/", "-")
     out_path  = os.path.join(OUTPUT_DIR, f"portfolio_{safe_name}.html")
     with open(out_path, "w", encoding="utf-8") as f:

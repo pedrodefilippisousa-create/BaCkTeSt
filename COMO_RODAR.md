@@ -4,6 +4,28 @@ Guia passo a passo para gerar o relatório com dados atualizados no seu próprio
 Mac. A instalação (passos 1 e 5) é feita **uma vez só**; depois, rodar leva
 poucos segundos.
 
+> O relatório é sempre gerado com os dados **mais recentes** do Yahoo Finance no
+> momento em que você roda — incluindo preço atual e máxima/mínima de 52 semanas
+> de cada ativo.
+
+---
+
+## ⭐ Jeito mais fácil (depois de instalar o Python — passo 1)
+
+Depois de instalar o Python e baixar o projeto (passos 1 e 2 abaixo), você pode
+usar o atalho pronto em vez de digitar comandos:
+
+1. Abra a pasta do projeto no Finder.
+2. Dê **dois cliques** em **`Atualizar e abrir relatorio.command`**.
+3. Ele baixa os dados novos e abre o relatório atualizado sozinho.
+
+Na **primeira vez**, o Mac pode dizer que o arquivo "não pode ser aberto".
+Nesse caso: clique com o **botão direito** no arquivo → **Abrir** → **Abrir**.
+Depois disso, os dois cliques funcionam normalmente.
+
+> O passo a passo manual abaixo continua valendo como alternativa (ou para
+> entender o que o atalho faz por baixo).
+
 ---
 
 ## Passo 1 — Instalar o Python (só uma vez)

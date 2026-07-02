@@ -455,7 +455,180 @@ def fig_individual_assets(prices, tickers):
     return fig
 
 
-def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics_df):
+PERIOD_LABELS = {"6M": "6 meses", "1A": "1 ano", "3A": "3 anos",
+                 "5A": "5 anos", "10A": "10 anos"}
+
+# Título + texto explicativo exibido acima de cada gráfico (chave = id do fig)
+CHART_INTROS = {
+    "frontier": ("Risco x Retorno por Ativo &amp; Fronteira Eficiente",
+        "Cada ponto é uma carteira simulada (Monte Carlo); o eixo X é a volatilidade anual (risco) e o "
+        "eixo Y o retorno esperado. Os marcadores destacados são as carteiras ótimas (Máximo Sharpe e "
+        "Mínima Volatilidade) e a inicial. A borda superior da nuvem é a fronteira eficiente — a melhor "
+        "combinação de ativos para cada nível de risco."),
+    "allocation": ("Alocação da Carteira",
+        "Distribuição dos pesos entre os ativos, comparando a carteira inicial com a otimizada de "
+        "Máximo Sharpe — a mesma informação da tabela acima em formato visual."),
+    "equity": ("Curvas de Equity por Período",
+        "Retorno acumulado (%) ao longo do tempo da carteira inicial e da otimizada, comparado aos "
+        "benchmarks, em cinco janelas históricas (6M, 1A, 3A, 5A, 10A)."),
+    "bar_returns": ("Retorno Total por Período",
+        "Mesma comparação da seção anterior, condensada em retorno total por janela — facilita ver em "
+        "quais períodos a otimização levou vantagem."),
+    "assets": ("Performance Individual dos Ativos — Últimos 12 Meses",
+        "Retorno de cada ativo isoladamente no último ano, em BRL. Útil para identificar quais posições "
+        "puxaram o resultado da carteira para cima ou para baixo."),
+    "drawdown": ("Drawdown — Últimos 12 Meses",
+        "Queda percentual em relação ao topo histórico mais recente (pico-a-vale). Quanto mais negativo "
+        "e prolongado, maior o risco de perda e o tempo de recuperação."),
+    "rolling_sharpe": ("Rolling Sharpe (252 dias) — Últimos 3 Anos",
+        "Sharpe Ratio calculado em janelas móveis de 1 ano, mostrando se a relação risco-retorno foi "
+        "consistente ao longo do tempo ou concentrada em poucos períodos bons."),
+    "correlation": ("Matriz de Correlação",
+        "Correlação histórica entre os retornos dos ativos. Valores próximos de 1 indicam ativos que se "
+        "movem juntos (pouca diversificação); valores baixos ou negativos ajudam a reduzir o risco total."),
+    "metrics_table": ("Métricas por Período",
+        "Consolidado numérico (retorno, volatilidade, Sharpe, Sortino, drawdown, VaR/CVaR, Calmar) por "
+        "janela de tempo, para leitura rápida sem precisar interpretar os gráficos."),
+}
+
+# Rótulo curto de cada gráfico no menu de navegação (chave = id do fig)
+NAV_LABELS = {
+    "frontier": "Fronteira Eficiente", "allocation": "Alocação", "equity": "Equity",
+    "bar_returns": "Retorno/Período", "assets": "Ativos", "drawdown": "Drawdown",
+    "rolling_sharpe": "Rolling Sharpe", "correlation": "Correlação", "metrics_table": "Métricas",
+}
+
+GLOSSARY = [
+    ("Sharpe Ratio", "Retorno em excesso ao ativo livre de risco, dividido pela volatilidade. "
+                     "Quanto maior, melhor a relação risco-retorno."),
+    ("Volatilidade", "Desvio-padrão anualizado dos retornos; mede a intensidade das oscilações de "
+                     "preço, usada como proxy de risco."),
+    ("Drawdown", "Maior queda percentual entre um pico e o vale seguinte antes de uma nova máxima "
+                 "ser atingida."),
+    ("Fronteira Eficiente", "Conjunto de carteiras que oferecem o maior retorno esperado para cada "
+                            "nível de risco, segundo a teoria de Markowitz."),
+    ("Correlação", "Mede o quanto dois ativos se movem juntos, de -1 (opostos) a +1 (idênticos); "
+                   "correlações baixas melhoram a diversificação."),
+    ("Rolling Sharpe", "Sharpe Ratio recalculado em janelas móveis, para revelar se o desempenho "
+                       "ajustado ao risco foi estável ao longo do tempo."),
+]
+
+BACK_TO_TOP = """<button id="back-to-top" aria-label="Voltar ao topo" onclick="window.scrollTo({top:0,behavior:'smooth'})">&uarr;</button>
+<script>
+  (function(){
+    var btn = document.getElementById('back-to-top');
+    window.addEventListener('scroll', function(){
+      btn.classList.toggle('show', window.scrollY > 600);
+    }, {passive:true});
+  })();
+</script>"""
+
+
+def _pct(v, decimals=1, signed=True):
+    """Formata fração como percentual pt-BR (vírgula decimal). None vira '—'."""
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return "—"
+    fmt = f"{{:+.{decimals}f}}" if signed else f"{{:.{decimals}f}}"
+    return fmt.format(v * 100).replace(".", ",") + "%"
+
+
+def build_period_summary(prices, w_ini, w_opt, tickers):
+    """Retorno total acumulado por período p/ carteira inicial, otimizada e benchmarks."""
+    rows = []
+    for label, delta in PERIODS.items():
+        p = prices.loc[datetime.today() - delta:]
+        if len(p) < 20:
+            continue
+        entry = {"Período": label}
+        for name, weights in [("Inicial", w_ini), ("Markowitz", w_opt)]:
+            pr = portfolio_returns(p, weights, tickers)
+            entry[name] = cumulative(pr).iloc[-1] - 1
+        for bench in BENCHMARKS:
+            if bench in p.columns:
+                entry[bench] = cumulative(p[bench].pct_change().dropna()).iloc[-1] - 1
+            else:
+                entry[bench] = None
+        rows.append(entry)
+    return rows
+
+
+def build_nav(fig_keys):
+    links = ['<a href="#resumo">Resumo</a>',
+             '<a href="#tabela-alocacao">Alocação Ótima</a>']
+    links += [f'<a href="#fig-{k}">{NAV_LABELS.get(k, k)}</a>' for k in fig_keys]
+    links.append('<a href="#glossario">Glossário</a>')
+    return ('<nav class="toc" aria-label="Navegação do relatório">\n  '
+            + "\n  ".join(links) + "\n</nav>")
+
+
+def build_glossary():
+    items = "".join(f"<div><dt>{term}</dt><dd>{desc}</dd></div>" for term, desc in GLOSSARY)
+    return (f'<div class="glossary" id="glossario"><div class="container">'
+            f'<h2>Glossário</h2><dl>{items}</dl></div></div>')
+
+
+def build_summary_section(summary_rows, tickers, w_opt):
+    """Resumo executivo: texto dinâmico + tabela carteira vs. benchmarks por período."""
+    bench_names = [BENCH_STYLE.get(b, {"name": b})["name"] for b in BENCHMARKS]
+
+    header = ("<tr><th>Período</th><th>Carteira Inicial</th><th>Carteira Otimizada</th>"
+              + "".join(f"<th>{n}</th>" for n in bench_names) + "</tr>")
+    body = ""
+    for row in summary_rows:
+        cols = [row.get("Inicial"), row.get("Markowitz")] + [row.get(b) for b in BENCHMARKS]
+        vals = [v for v in cols if v is not None]
+        best = max(vals) if vals else None
+        tds = ""
+        for v in cols:
+            if v is not None and best is not None and abs(v - best) < 1e-12:
+                tds += f'<td style="color:#26A69A"><b>{_pct(v, decimals=2)}</b></td>'
+            else:
+                tds += f"<td>{_pct(v, decimals=2)}</td>"
+        label = PERIOD_LABELS.get(row["Período"], row["Período"])
+        body += f"<tr><td>{label}</td>{tds}</tr>"
+
+    n_br = sum(t.endswith(".SA") for t in tickers)
+    n_us = len(tickers) - n_br
+    opt_pairs = sorted(zip(tickers, w_opt), key=lambda x: -x[1])
+    top = [(t, w) for t, w in opt_pairs if w >= 0.05][:5] or opt_pairs[:3]
+    top_str = ", ".join(f"{t} ({_pct(w, signed=False)})" for t, w in top)
+    zeroed = [t for t, w in zip(tickers, w_opt) if w < 0.005]
+    zeroed_str = ", ".join(zeroed) if zeroed else "nenhum ativo"
+    period_names = ", ".join(PERIOD_LABELS.get(r["Período"], r["Período"]) for r in summary_rows)
+
+    caveat = ""
+    if summary_rows:
+        last = summary_rows[-1]
+        mk = last.get("Markowitz")
+        winners = [BENCH_STYLE.get(b, {"name": b})["name"] for b in BENCHMARKS
+                   if last.get(b) is not None and mk is not None and last[b] > mk]
+        if winners:
+            verbo = "supera" if len(winners) == 1 else "superam"
+            caveat = (f" No período mais longo ({PERIOD_LABELS.get(last['Período'], last['Período'])}), "
+                      f"{' e '.join(winners)} {verbo} a carteira otimizada — a otimização de Markowitz "
+                      f"é ajustada com dados históricos e não garante repetição futura desse desempenho "
+                      f"(risco de <i>overfitting</i> nos pesos).")
+
+    return f"""<section class="summary-section" id="resumo">
+  <h2>Resumo Executivo</h2>
+  <p>Este relatório compara uma alocação inicial (pesos definidos manualmente) com uma carteira
+  <b>otimizada via Markowitz</b> para o mesmo conjunto de {len(tickers)} ativos ({n_br} brasileiros e
+  {n_us} americanos), medindo o retorno acumulado contra os benchmarks
+  <b>{' e '.join(bench_names)}</b> em janelas de {period_names}.</p>
+  <p>A carteira de <b>Máximo Sharpe</b> concentra posição em {top_str}, reduzindo a zero a exposição a
+  {zeroed_str}. Essa realocação eleva o retorno esperado e o Sharpe Ratio, ao custo de maior
+  concentração (menor diversificação) — vale conferir a <a href="#fig-correlation">matriz de
+  correlação</a> antes de aplicar os pesos na prática.</p>
+  <table class="summary-table">
+    <thead>{header}</thead>
+    <tbody>{body}</tbody>
+  </table>
+  <p class="summary-note">Retornos acumulados extraídos das curvas de equity da seção "Curvas de Equity
+  por Período" abaixo.{caveat}</p>
+</section>"""
+
+
+def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics_df, summary_rows):
     ms_r, ms_v, ms_s = mkt["max_sharpe"]["stats"]
     mv_r, mv_v, _    = mkt["min_vol"]["stats"]
     alloc_rows = ""
@@ -485,9 +658,16 @@ def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics
             <div class="card-value">{len(tickers)}</div></div>
     </div>"""
     sections = "".join(
-        f'<section class="chart-section"><div id="fig-{k}" class="chart-wrap">{v}</div></section>'
+        f'<section class="chart-section">'
+        f'<div class="section-intro"><h2>{CHART_INTROS.get(k, ("", ""))[0]}</h2>'
+        f'<p>{CHART_INTROS.get(k, ("", ""))[1]}</p></div>'
+        f'<div id="fig-{k}" class="chart-wrap">{v}</div></section>'
         for k, v in figures_html.items()
     )
+    nav_toc       = build_nav(list(figures_html.keys()))
+    summary_html  = build_summary_section(summary_rows, tickers, w_opt)
+    glossary_html = build_glossary()
+    back_to_top   = BACK_TO_TOP
     bench_labels = " + ".join(BENCH_STYLE.get(b, {"name": b})["name"] for b in BENCHMARKS)
     return f"""<!DOCTYPE html>
 <html lang="pt-BR">
@@ -520,6 +700,44 @@ def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics
   .mini{{display:inline-block;font-size:.65rem;padding:2px 6px;border-radius:4px;background:#21262D;color:#8B949E;margin-left:6px;vertical-align:middle}}
   footer{{text-align:center;color:#3D444D;font-size:.75rem;margin-top:48px}}
   .tag{{display:inline-block;background:#21262D;border:1px solid #2D3748;border-radius:20px;padding:4px 12px;font-size:.75rem;color:#8B949E;margin:4px 2px}}
+  html{{scroll-behavior:smooth}}
+  .toc{{position:sticky;top:0;z-index:50;background:#161B22;border-bottom:1px solid #2D3748;
+       padding:10px 32px;display:flex;gap:6px;overflow-x:auto;white-space:nowrap}}
+  .toc a{{color:#8B949E;font-size:.78rem;text-decoration:none;padding:6px 12px;border-radius:16px;
+         border:1px solid transparent;transition:.15s}}
+  .toc a:hover{{color:#E6EDF3;border-color:#2D3748}}
+  .toc a:focus-visible{{outline:2px solid #FF6F00}}
+  .summary-section{{background:#161B22;border:1px solid #2D3748;border-radius:10px;
+                    padding:24px 28px;margin:32px 0}}
+  .summary-section h2{{font-size:1.1rem;margin-bottom:12px}}
+  .summary-section p{{color:#C9D1D9;font-size:.9rem;line-height:1.6;margin-bottom:14px}}
+  .summary-table{{width:100%;border-collapse:collapse;margin-top:8px}}
+  .summary-table th{{background:#21262D;padding:8px 12px;font-size:.75rem;color:#8B949E;
+                     text-transform:uppercase;letter-spacing:.5px;text-align:center}}
+  .summary-table td{{padding:8px 12px;text-align:center;font-size:.85rem;border-top:1px solid #2D3748}}
+  .summary-note{{color:#8B949E;font-size:.75rem;margin-top:10px}}
+  .section-intro{{max-width:900px;margin:0 0 12px;color:#8B949E;font-size:.85rem;line-height:1.55}}
+  .section-intro h2{{color:#E6EDF3;font-size:1rem;text-transform:none;letter-spacing:0;
+                     margin-bottom:6px;font-weight:600}}
+  .chart-section{{scroll-margin-top:64px}}
+  .glossary{{margin:40px 0 8px}}
+  .glossary h2{{font-size:1rem;color:#8B949E;margin-bottom:14px;text-transform:uppercase;letter-spacing:.8px}}
+  .glossary dl{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px 24px}}
+  .glossary dt{{color:#FF6F00;font-weight:600;font-size:.85rem;margin-bottom:4px}}
+  .glossary dd{{color:#8B949E;font-size:.8rem;line-height:1.5}}
+  #back-to-top{{position:fixed;right:24px;bottom:24px;width:44px;height:44px;border-radius:50%;
+                background:#FF6F00;color:#0D1117;border:none;font-size:1.1rem;cursor:pointer;
+                display:none;align-items:center;justify-content:center;box-shadow:0 4px 12px rgba(0,0,0,.4);z-index:60}}
+  #back-to-top.show{{display:flex}}
+  @media (max-width:640px){{
+    header{{padding:24px 20px 20px}}
+    .container{{padding:0 16px}}
+    .toc{{padding:8px 16px}}
+    table{{display:block;overflow-x:auto}}
+  }}
+  @media print{{
+    .toc,#back-to-top{{display:none}}
+  }}
 </style>
 </head>
 <body>
@@ -534,8 +752,10 @@ def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics
   </div>
 </header>
 <div class="container">
+{nav_toc}
+{summary_html}
   {summary_cards}
-  <div class="alloc-section">
+  <div class="alloc-section" id="tabela-alocacao">
     <h2>Alocação Ótima — Markowitz (Max Sharpe)</h2>
     <table>
       <thead><tr><th>Ativo</th><th>Peso Inicial</th><th>Peso Ótimo</th><th>Variação</th></tr></thead>
@@ -544,7 +764,9 @@ def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics
   </div>
   {sections}
 </div>
+{glossary_html}
 <footer><div class="container">Portfolio Analysis Dashboard · Dados via Yahoo Finance · {datetime.today().year}</div></footer>
+{back_to_top}
 </body>
 </html>"""
 
@@ -592,7 +814,8 @@ def main():
     w_opt = mkt["max_sharpe"]["weights"]
 
     print("[3/5] Calculando métricas...")
-    metrics_df = build_metrics(prices, w_ini, w_opt, tickers)
+    metrics_df   = build_metrics(prices, w_ini, w_opt, tickers)
+    summary_rows = build_period_summary(prices, w_ini, w_opt, tickers)
 
     print("[4/5] Gerando gráficos...")
     figs = {
@@ -612,7 +835,7 @@ def main():
                  for k, v in figs.items()}
 
     print("[5/5] Montando HTML...")
-    html = build_html(figs_html, PORTFOLIO_NAME, tickers, w_ini, w_opt, mkt, metrics_df)
+    html = build_html(figs_html, PORTFOLIO_NAME, tickers, w_ini, w_opt, mkt, metrics_df, summary_rows)
     safe_name = PORTFOLIO_NAME.replace(" ", "_").replace("/", "-")
     out_path  = os.path.join(OUTPUT_DIR, f"portfolio_{safe_name}.html")
     with open(out_path, "w", encoding="utf-8") as f:

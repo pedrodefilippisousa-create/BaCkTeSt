@@ -16,6 +16,7 @@ from plotly.subplots import make_subplots
 from scipy.optimize import minimize
 from datetime import datetime, timedelta
 import os
+import json
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  CONFIGURAÇÃO — edite tudo aqui
@@ -618,11 +619,13 @@ def build_period_summary(prices, w_ini, w_opt, tickers):
     return rows
 
 
-def build_nav(fig_keys, has_groups=False):
+def build_nav(fig_keys, has_groups=False, has_sim=False):
     links = ['<a href="#resumo">Resumo</a>',
              '<a href="#tabela-alocacao">Alocação Ótima</a>']
     if has_groups:
         links.append('<a href="#grupos">Brasil × EUA</a>')
+    if has_sim:
+        links.append('<a href="#simulador">🎚️ Simulador</a>')
     links += [f'<a href="#fig-{k}">{NAV_LABELS.get(k, k)}</a>' for k in fig_keys]
     links.append('<a href="#glossario">Glossário</a>')
     return ('<nav class="toc" aria-label="Navegação do relatório">\n  '
@@ -735,8 +738,204 @@ def build_group_section(prices, tickers, w_ini, period="1A"):
 </section>"""
 
 
+def _css_id(t):
+    """ID seguro para HTML/CSS a partir de um ticker (ex.: BRK-B -> BRK_B)."""
+    return "".join(c if c.isalnum() else "_" for c in t)
+
+
+SIMULATOR_JS = r"""
+<script>
+(function(){
+  const SIM = __SIM_JSON__;
+  const DATEOBJ = SIM.dates.map(d => new Date(d));
+  const LAST = DATEOBJ[DATEOBJ.length - 1];
+  const sliders = {};
+  let curPeriod = "1A";
+
+  const cssId = t => t.replace(/[^a-zA-Z0-9]/g, "_");
+  const fmtPct = (v, dec=1, signed=true) => {
+    if (!isFinite(v)) return "—";
+    let s = (signed && v > 0 ? "+" : "") + (v*100).toFixed(dec);
+    return s.replace(".", ",") + "%";
+  };
+  function currentWeights(){
+    const raw = SIM.tickers.map(t => sliders[t] ? +sliders[t].value : 0);
+    const sum = raw.reduce((a,b) => a+b, 0);
+    return sum <= 0 ? raw.map(() => 0) : raw.map(x => x/sum);
+  }
+  function startIndex(days){
+    const cutoff = new Date(LAST.getTime() - days*86400000);
+    for (let i=0; i<DATEOBJ.length; i++) if (DATEOBJ[i] >= cutoff) return i;
+    return 0;
+  }
+  function cumSeries(daily){
+    let c = 1; const out = [];
+    for (const r of daily){ c *= (1+r); out.push((c-1)*100); }
+    return out;
+  }
+  function stats(daily){
+    const n = daily.length;
+    if (!n) return {ret:NaN, vol:NaN, sharpe:NaN, mdd:NaN, total:NaN};
+    let c=1, peak=1, mdd=0, sum=0;
+    for (const r of daily){ c*=(1+r); if(c>peak)peak=c; const dd=(c-peak)/peak; if(dd<mdd)mdd=dd; sum+=r; }
+    const total = c-1, mean = sum/n;
+    let vs=0; for (const r of daily) vs += (r-mean)*(r-mean);
+    const std = Math.sqrt(vs/((n-1)||1));
+    const annR = Math.pow(1+total, 252/n)-1;
+    const annV = std*Math.sqrt(252);
+    return {ret:annR, vol:annV, sharpe: annV ? (annR-SIM.rf)/annV : NaN, mdd:mdd, total:total};
+  }
+  function setCard(id, val, color){
+    const el = document.getElementById(id);
+    if (el){ el.textContent = val; if (color) el.style.color = color; }
+  }
+  function compute(){
+    const w = currentWeights();
+    const days = SIM.periods[curPeriod];
+    const start = startIndex(days);
+    const dates = SIM.dates.slice(start);
+    const N = dates.length;
+    const daily = new Array(N).fill(0);
+    SIM.tickers.forEach((t, ti) => {
+      const wt = w[ti]; if (!wt) return;
+      const arr = SIM.returns[t];
+      for (let i=0; i<N; i++) daily[i] += wt*arr[start+i];
+    });
+    SIM.tickers.forEach((t, ti) => {
+      const el = document.getElementById("w-"+cssId(t));
+      if (el) el.textContent = fmtPct(w[ti], 1, false);
+    });
+    const s = stats(daily);
+    setCard("sim-ret", fmtPct(s.ret), s.ret>=0 ? "#26A69A" : "#EF5350");
+    setCard("sim-vol", fmtPct(s.vol,1,false), "#E6EDF3");
+    setCard("sim-sharpe", isFinite(s.sharpe) ? s.sharpe.toFixed(2) : "—",
+            s.sharpe>=1 ? "#26A69A" : (s.sharpe>=0 ? "#FFA726" : "#EF5350"));
+    setCard("sim-mdd", fmtPct(s.mdd), "#EF5350");
+    setCard("sim-total", fmtPct(s.total), s.total>=0 ? "#26A69A" : "#EF5350");
+    if (!window.Plotly) return;
+    const traces = [{x:dates, y:cumSeries(daily), mode:"lines", name:"Sua carteira",
+                     line:{color:"#FF6F00", width:3},
+                     hovertemplate:"%{x|%d/%m/%Y}<br>%{y:.1f}%<extra>Sua carteira</extra>"}];
+    const bcolors = {"IBOV":"#AB47BC", "SPY":"#FFA726"};
+    let bi = 0;
+    Object.keys(SIM.benchmarks).forEach(bn => {
+      const arr = SIM.benchmarks[bn].slice(start);
+      traces.push({x:dates, y:cumSeries(arr), mode:"lines", name:bn,
+        line:{color: bcolors[bn] || ["#42A5F5","#66BB6A"][bi++ % 2], width:1.5, dash:"dash"},
+        hovertemplate:"%{x|%d/%m/%Y}<br>%{y:.1f}%<extra>"+bn+"</extra>"});
+    });
+    Plotly.react("sim-chart", traces, {
+      paper_bgcolor:"#0D1117", plot_bgcolor:"#161B22",
+      font:{color:"#E6EDF3", family:"Inter, Arial, sans-serif"},
+      margin:{t:12, r:12, b:40, l:52}, height:420, hovermode:"x unified",
+      legend:{orientation:"h", y:1.12, bgcolor:"rgba(0,0,0,0)"},
+      xaxis:{gridcolor:"#2D3748"}, yaxis:{gridcolor:"#2D3748", ticksuffix:"%", title:"Retorno acumulado (%)"}
+    }, {responsive:true, displayModeBar:false});
+  }
+  function setWeights(arr){
+    SIM.tickers.forEach((t,i) => { if (sliders[t]) sliders[t].value = Math.round(arr[i]*100); });
+    compute();
+  }
+  function waitPlotly(){ if (window.Plotly) compute(); else setTimeout(waitPlotly, 120); }
+  function init(){
+    SIM.tickers.forEach(t => {
+      sliders[t] = document.getElementById("slider-"+cssId(t));
+      if (sliders[t]) sliders[t].addEventListener("input", compute);
+    });
+    document.querySelectorAll(".sim-periods button").forEach(btn =>
+      btn.addEventListener("click", () => {
+        curPeriod = btn.dataset.period;
+        document.querySelectorAll(".sim-periods button").forEach(b => b.classList.remove("active"));
+        btn.classList.add("active"); compute();
+      }));
+    const bind = (id, fn) => { const b = document.getElementById(id); if (b) b.addEventListener("click", fn); };
+    bind("sim-btn-ini", () => setWeights(SIM.w_ini));
+    bind("sim-btn-opt", () => setWeights(SIM.w_opt));
+    bind("sim-btn-eq",  () => setWeights(SIM.tickers.map(() => 1/SIM.tickers.length)));
+    bind("sim-btn-zero",() => setWeights(SIM.tickers.map(() => 0)));
+    waitPlotly();
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
+  else init();
+})();
+</script>
+"""
+
+
+def build_simulator(prices, tickers, w_ini, w_opt):
+    """Painel interativo: sliders de peso recalculando retorno/risco/Sharpe/curva no navegador."""
+    avail_bench = [b for b in BENCHMARKS if b in prices.columns]
+    rets = prices[tickers + avail_bench].pct_change().dropna()
+    if len(rets) < 20:
+        return ""
+    data = {
+        "dates":    [d.strftime("%Y-%m-%d") for d in rets.index],
+        "returns":  {t: [round(float(x), 5) for x in rets[t].values] for t in tickers},
+        "benchmarks": {BENCH_STYLE.get(b, {"name": b})["name"]:
+                       [round(float(x), 5) for x in rets[b].values] for b in avail_bench},
+        "tickers":  tickers,
+        "w_ini":    [round(float(x), 4) for x in w_ini],
+        "w_opt":    [round(float(x), 4) for x in w_opt],
+        "rf":       RISK_FREE_RATE,
+        "periods":  {"6M": 183, "1A": 365, "3A": 1095, "5A": 1825, "10A": 3650},
+    }
+    sim_json = json.dumps(data, ensure_ascii=False)
+
+    rows = ""
+    for t, wi in zip(tickers, w_ini):
+        origem = "BR" if t.endswith(".SA") else "US"
+        cid = _css_id(t)
+        rows += f"""
+        <div class="sim-row">
+          <span class="sim-name">{t} <span class="mini">{origem}</span></span>
+          <input type="range" min="0" max="100" step="1" value="{round(wi*100)}"
+                 id="slider-{cid}" class="sim-slider" aria-label="Peso de {t}">
+          <span class="sim-weight" id="w-{cid}">{wi*100:.1f}%</span>
+        </div>"""
+
+    def _pbtn(k):
+        cls = ' class="active"' if k == "1A" else ''
+        return f'<button data-period="{k}"{cls}>{k}</button>'
+    periods_html = "".join(_pbtn(k) for k in ["6M", "1A", "3A", "5A", "10A"])
+
+    section = f"""<section class="summary-section" id="simulador">
+  <h2>🎚️ Simulador de Carteira</h2>
+  <p>Arraste os controles para mudar o peso de cada ativo — retorno, risco, Sharpe e a curva abaixo
+  recalculam <b>na hora</b>. Os pesos são normalizados automaticamente para somar 100%. Coloque um ativo
+  em 0 para removê-lo da simulação. (Para incluir um ativo <i>novo</i>, edite o <code>PORTFOLIO</code> no
+  <code>Backtest.py</code> e rode de novo.)</p>
+  <div class="sim-periods">Período:&nbsp; {periods_html}</div>
+  <div class="cards" style="margin:18px 0">
+    <div class="card"><div class="card-label">Retorno anualizado</div>
+        <div class="card-value" id="sim-ret">—</div></div>
+    <div class="card"><div class="card-label">Retorno total (período)</div>
+        <div class="card-value" id="sim-total">—</div></div>
+    <div class="card"><div class="card-label">Volatilidade anual</div>
+        <div class="card-value" id="sim-vol">—</div></div>
+    <div class="card"><div class="card-label">Sharpe Ratio</div>
+        <div class="card-value" id="sim-sharpe">—</div></div>
+    <div class="card"><div class="card-label">Máx. Drawdown</div>
+        <div class="card-value" id="sim-mdd">—</div></div>
+  </div>
+  <div class="sim-layout">
+    <div class="sim-controls">
+      <div class="sim-buttons">
+        <button id="sim-btn-ini" type="button">Pesos iniciais</button>
+        <button id="sim-btn-opt" type="button">Pesos ótimos</button>
+        <button id="sim-btn-eq" type="button">Igualar (1/N)</button>
+        <button id="sim-btn-zero" type="button">Zerar</button>
+      </div>
+      {rows}
+    </div>
+    <div class="chart-wrap sim-chartwrap"><div id="sim-chart" style="height:420px;width:100%"></div></div>
+  </div>
+</section>
+{SIMULATOR_JS.replace("__SIM_JSON__", sim_json)}"""
+    return section
+
+
 def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics_df, summary_rows,
-               group_html=""):
+               group_html="", simulator_html=""):
     ms_r, ms_v, ms_s = mkt["max_sharpe"]["stats"]
     mv_r, mv_v, _    = mkt["min_vol"]["stats"]
     alloc_rows = ""
@@ -772,7 +971,8 @@ def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics
         f'<div id="fig-{k}" class="chart-wrap">{v}</div></section>'
         for k, v in figures_html.items()
     )
-    nav_toc       = build_nav(list(figures_html.keys()), has_groups=bool(group_html))
+    nav_toc       = build_nav(list(figures_html.keys()), has_groups=bool(group_html),
+                              has_sim=bool(simulator_html))
     summary_html  = build_summary_section(summary_rows, tickers, w_opt)
     glossary_html = build_glossary()
     back_to_top   = BACK_TO_TOP
@@ -824,6 +1024,31 @@ def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics
                      text-transform:uppercase;letter-spacing:.5px;text-align:center}}
   .summary-table td{{padding:8px 12px;text-align:center;font-size:.85rem;border-top:1px solid #2D3748}}
   .summary-note{{color:#8B949E;font-size:.75rem;margin-top:10px}}
+  .summary-section code{{background:#0D1117;border:1px solid #2D3748;border-radius:4px;
+                         padding:1px 5px;font-size:.85em;color:#FFA726}}
+  .sim-periods{{display:flex;align-items:center;gap:6px;color:#8B949E;font-size:.8rem;flex-wrap:wrap}}
+  .sim-periods button{{background:#21262D;color:#8B949E;border:1px solid #2D3748;border-radius:14px;
+                       padding:4px 14px;cursor:pointer;font-size:.8rem;transition:.15s}}
+  .sim-periods button:hover{{color:#E6EDF3;border-color:#FF6F00}}
+  .sim-periods button.active{{background:#FF6F00;color:#0D1117;border-color:#FF6F00;font-weight:600}}
+  .sim-layout{{display:grid;grid-template-columns:340px 1fr;gap:20px;align-items:start}}
+  .sim-controls{{background:#0D1117;border:1px solid #2D3748;border-radius:10px;padding:14px 16px;
+                 max-height:520px;overflow-y:auto}}
+  .sim-buttons{{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px}}
+  .sim-buttons button{{flex:1 1 auto;background:#21262D;color:#E6EDF3;border:1px solid #2D3748;
+                       border-radius:6px;padding:6px 8px;font-size:.72rem;cursor:pointer;transition:.15s}}
+  .sim-buttons button:hover{{border-color:#FF6F00;color:#FF6F00}}
+  .sim-row{{display:grid;grid-template-columns:1fr 120px 52px;align-items:center;gap:10px;
+            padding:6px 0;border-top:1px solid #21262D}}
+  .sim-name{{font-size:.82rem;color:#E6EDF3}}
+  .sim-weight{{font-size:.8rem;color:#FF6F00;text-align:right;font-variant-numeric:tabular-nums}}
+  .sim-slider{{-webkit-appearance:none;appearance:none;height:5px;border-radius:3px;
+               background:#2D3748;outline:none;cursor:pointer}}
+  .sim-slider::-webkit-slider-thumb{{-webkit-appearance:none;appearance:none;width:15px;height:15px;
+               border-radius:50%;background:#FF6F00;cursor:pointer;border:2px solid #0D1117}}
+  .sim-slider::-moz-range-thumb{{width:15px;height:15px;border-radius:50%;background:#FF6F00;
+               cursor:pointer;border:2px solid #0D1117}}
+  .sim-chartwrap{{min-width:0}}
   .section-intro{{max-width:900px;margin:0 0 12px;color:#8B949E;font-size:.85rem;line-height:1.55}}
   .section-intro h2{{color:#E6EDF3;font-size:1rem;text-transform:none;letter-spacing:0;
                      margin-bottom:6px;font-weight:600}}
@@ -837,6 +1062,9 @@ def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics
                 background:#FF6F00;color:#0D1117;border:none;font-size:1.1rem;cursor:pointer;
                 display:none;align-items:center;justify-content:center;box-shadow:0 4px 12px rgba(0,0,0,.4);z-index:60}}
   #back-to-top.show{{display:flex}}
+  @media (max-width:900px){{
+    .sim-layout{{grid-template-columns:1fr}}
+  }}
   @media (max-width:640px){{
     header{{padding:24px 20px 20px}}
     .container{{padding:0 16px}}
@@ -871,6 +1099,7 @@ def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics
     </table>
   </div>
   {group_html}
+  {simulator_html}
   {sections}
 </div>
 {glossary_html}
@@ -951,7 +1180,8 @@ def main():
         "correlation":    fig_correlation(prices, tickers),
         "metrics_table":  fig_metrics_table(metrics_df),
     })
-    group_html = build_group_section(prices, tickers, w_ini, period="1A")
+    group_html     = build_group_section(prices, tickers, w_ini, period="1A")
+    simulator_html = build_simulator(prices, tickers, w_ini, w_opt)
     figs_html = {k: v.to_html(full_html=False,
                                include_plotlyjs="cdn" if k == list(figs.keys())[0] else False,
                                config={"responsive": True, "displayModeBar": True})
@@ -959,7 +1189,7 @@ def main():
 
     print("[5/5] Montando HTML...")
     html = build_html(figs_html, PORTFOLIO_NAME, tickers, w_ini, w_opt, mkt, metrics_df,
-                      summary_rows, group_html=group_html)
+                      summary_rows, group_html=group_html, simulator_html=simulator_html)
     safe_name = PORTFOLIO_NAME.replace(" ", "_").replace("/", "-")
     out_path  = os.path.join(OUTPUT_DIR, f"portfolio_{safe_name}.html")
     with open(out_path, "w", encoding="utf-8") as f:

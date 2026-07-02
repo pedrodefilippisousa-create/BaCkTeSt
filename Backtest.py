@@ -16,6 +16,7 @@ from plotly.subplots import make_subplots
 from scipy.optimize import minimize
 from datetime import datetime, timedelta
 import os
+import json
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  CONFIGURAÇÃO — edite tudo aqui
@@ -80,6 +81,8 @@ THEME = dict(
     plot_bgcolor="#161B22",
     font_color="#E6EDF3",
     font_family="Inter, Arial, sans-serif",
+    font_size=13,
+    title_font_size=18,
 )
 
 
@@ -283,7 +286,7 @@ def fig_equity_periods(prices, w_ini, w_opt, tickers):
                 hovertemplate="%{x|%d/%m/%Y}<br>%{y:.1f}%<extra>" + style["name"] + "</extra>",
             ), row=r, col=c)
     fig.update_layout(title=f"Curvas de Equity por Período (base {BASE_CURRENCY})",
-                      **THEME, height=600,
+                      **THEME, height=600, hovermode="x unified",
                       legend=dict(bgcolor="#161B22", bordercolor="#2D3748"))
     fig.update_xaxes(gridcolor=COLORS["grid"])
     fig.update_yaxes(gridcolor=COLORS["grid"], ticksuffix="%")
@@ -311,8 +314,9 @@ def fig_drawdown(prices, w_ini, w_opt, tickers):
             hovertemplate="%{x|%d/%m/%Y}<br>%{y:.2f}%<extra>" + name + "</extra>",
         ))
     fig.update_layout(title="Drawdown — Últimos 12 Meses", yaxis_title="Drawdown (%)",
-        **THEME, height=350, legend=dict(bgcolor="#161B22", bordercolor="#2D3748"),
-        xaxis=dict(gridcolor=COLORS["grid"]), yaxis=dict(gridcolor=COLORS["grid"]))
+        **THEME, height=350, hovermode="x unified",
+        legend=dict(bgcolor="#161B22", bordercolor="#2D3748"),
+        xaxis=dict(gridcolor=COLORS["grid"]), yaxis=dict(gridcolor=COLORS["grid"], ticksuffix="%"))
     return fig
 
 
@@ -342,18 +346,30 @@ def fig_rolling_sharpe(prices, w_ini, w_opt, tickers):
 
 
 def fig_correlation(prices, tickers):
-    corr = prices[tickers].pct_change().dropna().corr()
+    # agrupa BR (.SA) primeiro, depois US, para os blocos aparecerem juntos
+    ordered = [t for t in tickers if t.endswith(".SA")] + [t for t in tickers if not t.endswith(".SA")]
+    corr = prices[ordered].pct_change().dropna().corr()
+    labels = [f"{t} 🇧🇷" if t.endswith(".SA") else f"{t} 🇺🇸" for t in ordered]
     fig = go.Figure(go.Heatmap(
-        z=corr.values, x=tickers, y=tickers,
+        z=corr.values, x=labels, y=labels,
         colorscale=[[0,"#EF5350"],[0.5,"#161B22"],[1,"#26A69A"]],
         zmin=-1, zmax=1,
         text=[[f"{v:.2f}" for v in row] for row in corr.values],
         texttemplate="%{text}", textfont=dict(size=11),
+        colorbar=dict(title=dict(text="Correlação", font=dict(color="#E6EDF3")),
+                      tickfont=dict(color="#E6EDF3")),
         hovertemplate="%{y} × %{x}<br>Correlação: %{z:.2f}<extra></extra>",
     ))
-    fig.update_layout(title="Matriz de Correlação", **THEME, height=460,
-        xaxis=dict(tickfont=dict(color="#E6EDF3")),
-        yaxis=dict(tickfont=dict(color="#E6EDF3")))
+    # linha separando o bloco BR do bloco US
+    n_br = sum(t.endswith(".SA") for t in ordered)
+    if 0 < n_br < len(ordered):
+        pos = n_br - 0.5
+        line = dict(color="#FF6F00", width=2)
+        fig.add_vline(x=pos, line=line)
+        fig.add_hline(y=pos, line=line)
+    fig.update_layout(title="Matriz de Correlação (🇧🇷 agrupadas, depois 🇺🇸)", **THEME, height=480,
+        xaxis=dict(tickfont=dict(color="#E6EDF3"), tickangle=-45),
+        yaxis=dict(tickfont=dict(color="#E6EDF3"), autorange="reversed"))
     return fig
 
 
@@ -435,24 +451,83 @@ def fig_metrics_table(metrics_df):
     return fig
 
 
-def fig_individual_assets(prices, tickers):
+def fig_individual_assets(prices, tickers, titulo=None):
     p = prices.loc[datetime.today() - PERIODS["1A"]:]
     fig = go.Figure()
     palette = px.colors.qualitative.Plotly + px.colors.qualitative.Bold
-    for i, t in enumerate(tickers):
+    # ordena por retorno no período (melhor -> pior) p/ leitura mais didática
+    finais = []
+    for t in tickers:
         if t not in p.columns:
             continue
         cum = (cumulative(p[t].pct_change().dropna()) - 1) * 100
-        fig.add_trace(go.Scatter(x=cum.index, y=cum.values, mode="lines", name=t,
+        finais.append((t, cum))
+    finais.sort(key=lambda x: x[1].iloc[-1] if len(x[1]) else 0, reverse=True)
+    for i, (t, cum) in enumerate(finais):
+        fim = cum.iloc[-1] if len(cum) else 0
+        fig.add_trace(go.Scatter(x=cum.index, y=cum.values, mode="lines",
+            name=f"{t}  ({fim:+.0f}%)",
             line=dict(color=palette[i % len(palette)], width=1.8),
             hovertemplate="%{x|%d/%m/%Y}<br>%{y:.1f}%<extra>" + t + "</extra>"))
-    fig.add_hline(y=0, line_color=COLORS["grid"])
-    fig.update_layout(title=f"Performance Individual dos Ativos — Últimos 12 Meses (base {BASE_CURRENCY})",
-        yaxis_title="Retorno (%)", **THEME, height=420,
-        legend=dict(bgcolor="#161B22", bordercolor="#2D3748"),
+    fig.add_hline(y=0, line_color=COLORS["grid"], line_width=1.5)
+    fig.update_layout(
+        title=titulo or f"Performance Individual dos Ativos — Últimos 12 Meses (base {BASE_CURRENCY})",
+        yaxis_title="Retorno acumulado (%)", **THEME, height=440,
+        legend=dict(bgcolor="#161B22", bordercolor="#2D3748", font=dict(size=12)),
+        hovermode="x unified",
         xaxis=dict(gridcolor=COLORS["grid"]),
-        yaxis=dict(gridcolor=COLORS["grid"], ticksuffix="%"))
+        yaxis=dict(gridcolor=COLORS["grid"], ticksuffix="%", zeroline=False))
     return fig
+
+
+def _group_indices(tickers):
+    """Índices dos ativos BR (.SA) e US dentro da lista de tickers."""
+    br = [i for i, t in enumerate(tickers) if t.endswith(".SA")]
+    us = [i for i, t in enumerate(tickers) if not t.endswith(".SA")]
+    return br, us
+
+
+def subportfolio_returns(prices, tickers, weights, idxs):
+    """Retornos diários de um sub-conjunto de ativos, com pesos renormalizados."""
+    if not idxs:
+        return None
+    sub_t = [tickers[i] for i in idxs]
+    sub_w = np.array([weights[i] for i in idxs], dtype=float)
+    if sub_w.sum() <= 0:
+        sub_w = np.ones(len(idxs))
+    sub_w = sub_w / sub_w.sum()
+    return portfolio_returns(prices, sub_w, sub_t)
+
+
+def build_group_stats(prices, tickers, w_ini, period="1A"):
+    """Rentabilidade/risco das ações BR, US e da carteira completa (mesmo período)."""
+    delta = PERIODS.get(period, PERIODS["1A"])
+    p = prices.loc[datetime.today() - delta:]
+    br_idx, us_idx = _group_indices(tickers)
+    groups = [
+        ("🇧🇷 Ações brasileiras", br_idx),
+        ("🇺🇸 Ações americanas", us_idx),
+        ("🧺 Carteira completa", list(range(len(tickers)))),
+    ]
+    rows = []
+    for name, idx in groups:
+        if not idx:
+            continue
+        pr = subportfolio_returns(p, tickers, w_ini, idx)
+        if pr is None or len(pr) < 5:
+            continue
+        cum = cumulative(pr)
+        a_r, a_v, sh = annualized_stats(pr)
+        rows.append({
+            "grupo": name,
+            "n": len(idx),
+            "retorno_total": cum.iloc[-1] - 1,
+            "retorno_anual": a_r,
+            "volatilidade": a_v,
+            "sharpe": sh,
+            "max_drawdown": max_drawdown(cum),
+        })
+    return rows
 
 
 PERIOD_LABELS = {"6M": "6 meses", "1A": "1 ano", "3A": "3 anos",
@@ -477,6 +552,12 @@ CHART_INTROS = {
     "assets": ("Performance Individual dos Ativos — Últimos 12 Meses",
         "Retorno de cada ativo isoladamente no último ano, em BRL. Útil para identificar quais posições "
         "puxaram o resultado da carteira para cima ou para baixo."),
+    "assets_br": ("🇧🇷 Ações Brasileiras — Últimos 12 Meses",
+        "Retorno acumulado de cada ação brasileira (.SA) no último ano, em BRL, ordenado da melhor "
+        "para a pior. Passe o mouse para ver o valor em cada data."),
+    "assets_us": ("🇺🇸 Ações Americanas — Últimos 12 Meses",
+        "Retorno acumulado de cada ação americana no último ano, já convertido para BRL, ordenado da "
+        "melhor para a pior. A conversão cambial (USD→BRL) afeta esses números."),
     "drawdown": ("Drawdown — Últimos 12 Meses",
         "Queda percentual em relação ao topo histórico mais recente (pico-a-vale). Quanto mais negativo "
         "e prolongado, maior o risco de perda e o tempo de recuperação."),
@@ -494,7 +575,8 @@ CHART_INTROS = {
 # Rótulo curto de cada gráfico no menu de navegação (chave = id do fig)
 NAV_LABELS = {
     "frontier": "Fronteira Eficiente", "allocation": "Alocação", "equity": "Equity",
-    "bar_returns": "Retorno/Período", "assets": "Ativos", "drawdown": "Drawdown",
+    "bar_returns": "Retorno/Período", "assets": "Ativos",
+    "assets_br": "Ativos BR", "assets_us": "Ativos US", "drawdown": "Drawdown",
     "rolling_sharpe": "Rolling Sharpe", "correlation": "Correlação", "metrics_table": "Métricas",
 }
 
@@ -552,9 +634,15 @@ def build_period_summary(prices, w_ini, w_opt, tickers):
     return rows
 
 
-def build_nav(fig_keys):
-    links = ['<a href="#resumo">Resumo</a>',
-             '<a href="#tabela-alocacao">Alocação Ótima</a>']
+def build_nav(fig_keys, has_groups=False, has_sim=False, has_quotes=False):
+    links = ['<a href="#resumo">Resumo</a>']
+    if has_quotes:
+        links.append('<a href="#cotacoes">💰 Cotações</a>')
+    links.append('<a href="#tabela-alocacao">Alocação Ótima</a>')
+    if has_groups:
+        links.append('<a href="#grupos">Brasil × EUA</a>')
+    if has_sim:
+        links.append('<a href="#simulador">🎚️ Simulador</a>')
     links += [f'<a href="#fig-{k}">{NAV_LABELS.get(k, k)}</a>' for k in fig_keys]
     links.append('<a href="#glossario">Glossário</a>')
     return ('<nav class="toc" aria-label="Navegação do relatório">\n  '
@@ -628,7 +716,327 @@ def build_summary_section(summary_rows, tickers, w_opt):
 </section>"""
 
 
-def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics_df, summary_rows):
+def _money(v, cur):
+    """Formata valor monetário em pt-BR: US$ 1.234,56 / R$ 32,45."""
+    s = f"{v:,.2f}".replace(",", "\x00").replace(".", ",").replace("\x00", ".")
+    return f"{cur} {s}"
+
+
+def fetch_native_prices(tickers, days=400):
+    """Baixa os preços de fechamento em moeda NATIVA (sem conversão FX) p/ a tabela de cotações."""
+    start = datetime.today() - timedelta(days=days)
+    data = yf.download(list(dict.fromkeys(tickers)), start=start,
+                       progress=False, auto_adjust=False)
+    if "Close" in getattr(data, "columns", []):
+        close = data["Close"]
+    elif isinstance(data.columns, pd.MultiIndex):
+        close = data["Close"]
+    else:
+        close = data.to_frame()
+    return close.dropna(how="all")
+
+
+def compute_quotes(native_prices, tickers):
+    """Preço atual e máx/mín de 52 semanas (moeda nativa) de cada ticker."""
+    rows = []
+    corte = datetime.today() - timedelta(days=365)
+    for t in tickers:
+        if t not in native_prices.columns:
+            continue
+        s = native_prices[t].dropna()
+        if s.empty:
+            continue
+        janela = s.loc[corte:]
+        if janela.empty:
+            janela = s
+        last = float(s.iloc[-1])
+        hi, lo = float(janela.max()), float(janela.min())
+        pos = (last - lo) / (hi - lo) if hi > lo else 0.5
+        rows.append({
+            "ticker": t,
+            "origem": "BR" if t.endswith(".SA") else "US",
+            "moeda": "R$" if t.endswith(".SA") else "US$",
+            "atual": last, "min52": lo, "max52": hi,
+            "pos": max(0.0, min(1.0, pos)),
+            "vs_max": last / hi - 1 if hi else 0.0,
+        })
+    return rows
+
+
+def build_quotes_section(rows):
+    """Seção HTML com preço atual + faixa de 52 semanas (com barra de posição)."""
+    if not rows:
+        return ""
+    body = ""
+    for r in rows:
+        posp = r["pos"] * 100
+        body += f"""
+      <tr>
+        <td style="text-align:left"><b>{r['ticker']}</b> <span class="mini">{r['origem']}</span></td>
+        <td><b>{_money(r['atual'], r['moeda'])}</b></td>
+        <td>{_money(r['min52'], r['moeda'])}</td>
+        <td>{_money(r['max52'], r['moeda'])}</td>
+        <td class="range-cell">
+          <div class="range-bar"><div class="range-dot" style="left:{posp:.0f}%"></div></div>
+          <span class="range-txt">{posp:.0f}% da faixa · {_pct(r['vs_max'])} vs. máx</span>
+        </td>
+      </tr>"""
+    return f"""<section class="summary-section" id="cotacoes">
+  <h2>💰 Cotações — Preço Atual e Faixa de 52 Semanas</h2>
+  <p>Preço de fechamento mais recente de cada ativo, na moeda nativa (🇧🇷 R$, 🇺🇸 US$), com a
+  <b>máxima e a mínima dos últimos 12 meses</b>. A barra mostra onde o preço atual está dentro dessa
+  faixa: à <span style="color:#EF5350">esquerda (vermelho)</span> = perto da mínima;
+  à <span style="color:#26A69A">direita (verde)</span> = perto da máxima.</p>
+  <table class="summary-table">
+    <thead><tr>
+      <th style="text-align:left">Ativo</th><th>Preço Atual</th><th>Mín. 52s</th><th>Máx. 52s</th>
+      <th style="text-align:left">Posição na faixa (52 semanas)</th>
+    </tr></thead>
+    <tbody>{body}
+    </tbody>
+  </table>
+  <p class="summary-note">Atualizado a cada execução do <code>Backtest.py</code>. "vs. máx" = variação em
+  relação à máxima de 52 semanas (quanto o preço está abaixo do topo do período).</p>
+</section>"""
+
+
+def build_group_section(prices, tickers, w_ini, period="1A"):
+    """Seção HTML comparando ações BR, US e a carteira completa (rentab./risco)."""
+    rows = build_group_stats(prices, tickers, w_ini, period)
+    if not rows:
+        return ""
+    periodo_txt = PERIOD_LABELS.get(period, period)
+    best_ret = max(r["retorno_total"] for r in rows)
+    body = ""
+    for r in rows:
+        destaque = ' style="color:#26A69A"' if abs(r["retorno_total"] - best_ret) < 1e-12 else ""
+        sh_color = "#26A69A" if r["sharpe"] >= 1 else ("#FFA726" if r["sharpe"] >= 0 else "#EF5350")
+        body += f"""
+      <tr>
+        <td style="text-align:left"><b>{r['grupo']}</b> <span class="mini">{r['n']} ativos</span></td>
+        <td{destaque}><b>{_pct(r['retorno_total'])}</b></td>
+        <td>{_pct(r['retorno_anual'])}</td>
+        <td>{_pct(r['volatilidade'], signed=False)}</td>
+        <td style="color:{sh_color}"><b>{r['sharpe']:.2f}</b></td>
+        <td style="color:#EF5350">{_pct(r['max_drawdown'])}</td>
+      </tr>"""
+    return f"""<section class="summary-section" id="grupos">
+  <h2>Brasil × Estados Unidos × Carteira Completa</h2>
+  <p>Comparação da fatia <b>brasileira</b>, da fatia <b>americana</b> e da <b>carteira completa</b> nos
+  últimos {periodo_txt} (pesos iniciais renormalizados dentro de cada grupo). Ajuda a ver de onde vem o
+  retorno e o risco — e o efeito da diversificação entre países ao juntar as duas.</p>
+  <table class="summary-table">
+    <thead><tr>
+      <th style="text-align:left">Grupo</th><th>Retorno Total</th><th>Retorno Anualiz.</th>
+      <th>Volatilidade</th><th>Sharpe</th><th>Máx. Drawdown</th>
+    </tr></thead>
+    <tbody>{body}
+    </tbody>
+  </table>
+  <p class="summary-note">Sharpe em verde = acima de 1 (boa relação risco-retorno); laranja = entre 0 e 1;
+  vermelho = negativo. A "carteira completa" costuma ter volatilidade menor que a média das partes graças
+  à diversificação.</p>
+</section>"""
+
+
+def _css_id(t):
+    """ID seguro para HTML/CSS a partir de um ticker (ex.: BRK-B -> BRK_B)."""
+    return "".join(c if c.isalnum() else "_" for c in t)
+
+
+SIMULATOR_JS = r"""
+<script>
+(function(){
+  const SIM = __SIM_JSON__;
+  const DATEOBJ = SIM.dates.map(d => new Date(d));
+  const LAST = DATEOBJ[DATEOBJ.length - 1];
+  const sliders = {};
+  let curPeriod = "1A";
+
+  const cssId = t => t.replace(/[^a-zA-Z0-9]/g, "_");
+  const fmtPct = (v, dec=1, signed=true) => {
+    if (!isFinite(v)) return "—";
+    let s = (signed && v > 0 ? "+" : "") + (v*100).toFixed(dec);
+    return s.replace(".", ",") + "%";
+  };
+  function currentWeights(){
+    const raw = SIM.tickers.map(t => sliders[t] ? +sliders[t].value : 0);
+    const sum = raw.reduce((a,b) => a+b, 0);
+    return sum <= 0 ? raw.map(() => 0) : raw.map(x => x/sum);
+  }
+  function startIndex(days){
+    const cutoff = new Date(LAST.getTime() - days*86400000);
+    for (let i=0; i<DATEOBJ.length; i++) if (DATEOBJ[i] >= cutoff) return i;
+    return 0;
+  }
+  function cumSeries(daily){
+    let c = 1; const out = [];
+    for (const r of daily){ c *= (1+r); out.push((c-1)*100); }
+    return out;
+  }
+  function stats(daily){
+    const n = daily.length;
+    if (!n) return {ret:NaN, vol:NaN, sharpe:NaN, mdd:NaN, total:NaN};
+    let c=1, peak=1, mdd=0, sum=0;
+    for (const r of daily){ c*=(1+r); if(c>peak)peak=c; const dd=(c-peak)/peak; if(dd<mdd)mdd=dd; sum+=r; }
+    const total = c-1, mean = sum/n;
+    let vs=0; for (const r of daily) vs += (r-mean)*(r-mean);
+    const std = Math.sqrt(vs/((n-1)||1));
+    const annR = Math.pow(1+total, 252/n)-1;
+    const annV = std*Math.sqrt(252);
+    return {ret:annR, vol:annV, sharpe: annV ? (annR-SIM.rf)/annV : NaN, mdd:mdd, total:total};
+  }
+  function setCard(id, val, color){
+    const el = document.getElementById(id);
+    if (el){ el.textContent = val; if (color) el.style.color = color; }
+  }
+  function compute(){
+    const w = currentWeights();
+    const days = SIM.periods[curPeriod];
+    const start = startIndex(days);
+    const dates = SIM.dates.slice(start);
+    const N = dates.length;
+    const daily = new Array(N).fill(0);
+    SIM.tickers.forEach((t, ti) => {
+      const wt = w[ti]; if (!wt) return;
+      const arr = SIM.returns[t];
+      for (let i=0; i<N; i++) daily[i] += wt*arr[start+i];
+    });
+    SIM.tickers.forEach((t, ti) => {
+      const el = document.getElementById("w-"+cssId(t));
+      if (el) el.textContent = fmtPct(w[ti], 1, false);
+    });
+    const s = stats(daily);
+    setCard("sim-ret", fmtPct(s.ret), s.ret>=0 ? "#26A69A" : "#EF5350");
+    setCard("sim-vol", fmtPct(s.vol,1,false), "#E6EDF3");
+    setCard("sim-sharpe", isFinite(s.sharpe) ? s.sharpe.toFixed(2) : "—",
+            s.sharpe>=1 ? "#26A69A" : (s.sharpe>=0 ? "#FFA726" : "#EF5350"));
+    setCard("sim-mdd", fmtPct(s.mdd), "#EF5350");
+    setCard("sim-total", fmtPct(s.total), s.total>=0 ? "#26A69A" : "#EF5350");
+    if (!window.Plotly) return;
+    const traces = [{x:dates, y:cumSeries(daily), mode:"lines", name:"Sua carteira",
+                     line:{color:"#FF6F00", width:3},
+                     hovertemplate:"%{x|%d/%m/%Y}<br>%{y:.1f}%<extra>Sua carteira</extra>"}];
+    const bcolors = {"IBOV":"#AB47BC", "SPY":"#FFA726"};
+    let bi = 0;
+    Object.keys(SIM.benchmarks).forEach(bn => {
+      const arr = SIM.benchmarks[bn].slice(start);
+      traces.push({x:dates, y:cumSeries(arr), mode:"lines", name:bn,
+        line:{color: bcolors[bn] || ["#42A5F5","#66BB6A"][bi++ % 2], width:1.5, dash:"dash"},
+        hovertemplate:"%{x|%d/%m/%Y}<br>%{y:.1f}%<extra>"+bn+"</extra>"});
+    });
+    Plotly.react("sim-chart", traces, {
+      paper_bgcolor:"#0D1117", plot_bgcolor:"#161B22",
+      font:{color:"#E6EDF3", family:"Inter, Arial, sans-serif"},
+      margin:{t:12, r:12, b:40, l:52}, height:420, hovermode:"x unified",
+      legend:{orientation:"h", y:1.12, bgcolor:"rgba(0,0,0,0)"},
+      xaxis:{gridcolor:"#2D3748"}, yaxis:{gridcolor:"#2D3748", ticksuffix:"%", title:"Retorno acumulado (%)"}
+    }, {responsive:true, displayModeBar:false});
+  }
+  function setWeights(arr){
+    SIM.tickers.forEach((t,i) => { if (sliders[t]) sliders[t].value = Math.round(arr[i]*100); });
+    compute();
+  }
+  function waitPlotly(){ if (window.Plotly) compute(); else setTimeout(waitPlotly, 120); }
+  function init(){
+    SIM.tickers.forEach(t => {
+      sliders[t] = document.getElementById("slider-"+cssId(t));
+      if (sliders[t]) sliders[t].addEventListener("input", compute);
+    });
+    document.querySelectorAll(".sim-periods button").forEach(btn =>
+      btn.addEventListener("click", () => {
+        curPeriod = btn.dataset.period;
+        document.querySelectorAll(".sim-periods button").forEach(b => b.classList.remove("active"));
+        btn.classList.add("active"); compute();
+      }));
+    const bind = (id, fn) => { const b = document.getElementById(id); if (b) b.addEventListener("click", fn); };
+    bind("sim-btn-ini", () => setWeights(SIM.w_ini));
+    bind("sim-btn-opt", () => setWeights(SIM.w_opt));
+    bind("sim-btn-eq",  () => setWeights(SIM.tickers.map(() => 1/SIM.tickers.length)));
+    bind("sim-btn-zero",() => setWeights(SIM.tickers.map(() => 0)));
+    waitPlotly();
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
+  else init();
+})();
+</script>
+"""
+
+
+def build_simulator(prices, tickers, w_ini, w_opt):
+    """Painel interativo: sliders de peso recalculando retorno/risco/Sharpe/curva no navegador."""
+    avail_bench = [b for b in BENCHMARKS if b in prices.columns]
+    rets = prices[tickers + avail_bench].pct_change().dropna()
+    if len(rets) < 20:
+        return ""
+    data = {
+        "dates":    [d.strftime("%Y-%m-%d") for d in rets.index],
+        "returns":  {t: [round(float(x), 5) for x in rets[t].values] for t in tickers},
+        "benchmarks": {BENCH_STYLE.get(b, {"name": b})["name"]:
+                       [round(float(x), 5) for x in rets[b].values] for b in avail_bench},
+        "tickers":  tickers,
+        "w_ini":    [round(float(x), 4) for x in w_ini],
+        "w_opt":    [round(float(x), 4) for x in w_opt],
+        "rf":       RISK_FREE_RATE,
+        "periods":  {"6M": 183, "1A": 365, "3A": 1095, "5A": 1825, "10A": 3650},
+    }
+    sim_json = json.dumps(data, ensure_ascii=False)
+
+    rows = ""
+    for t, wi in zip(tickers, w_ini):
+        origem = "BR" if t.endswith(".SA") else "US"
+        cid = _css_id(t)
+        rows += f"""
+        <div class="sim-row">
+          <span class="sim-name">{t} <span class="mini">{origem}</span></span>
+          <input type="range" min="0" max="100" step="1" value="{round(wi*100)}"
+                 id="slider-{cid}" class="sim-slider" aria-label="Peso de {t}">
+          <span class="sim-weight" id="w-{cid}">{wi*100:.1f}%</span>
+        </div>"""
+
+    def _pbtn(k):
+        cls = ' class="active"' if k == "1A" else ''
+        return f'<button data-period="{k}"{cls}>{k}</button>'
+    periods_html = "".join(_pbtn(k) for k in ["6M", "1A", "3A", "5A", "10A"])
+
+    section = f"""<section class="summary-section" id="simulador">
+  <h2>🎚️ Simulador de Carteira</h2>
+  <p>Arraste os controles para mudar o peso de cada ativo — retorno, risco, Sharpe e a curva abaixo
+  recalculam <b>na hora</b>. Os pesos são normalizados automaticamente para somar 100%. Coloque um ativo
+  em 0 para removê-lo da simulação. (Para incluir um ativo <i>novo</i>, edite o <code>PORTFOLIO</code> no
+  <code>Backtest.py</code> e rode de novo.)</p>
+  <div class="sim-periods">Período:&nbsp; {periods_html}</div>
+  <div class="cards" style="margin:18px 0">
+    <div class="card"><div class="card-label">Retorno anualizado</div>
+        <div class="card-value" id="sim-ret">—</div></div>
+    <div class="card"><div class="card-label">Retorno total (período)</div>
+        <div class="card-value" id="sim-total">—</div></div>
+    <div class="card"><div class="card-label">Volatilidade anual</div>
+        <div class="card-value" id="sim-vol">—</div></div>
+    <div class="card"><div class="card-label">Sharpe Ratio</div>
+        <div class="card-value" id="sim-sharpe">—</div></div>
+    <div class="card"><div class="card-label">Máx. Drawdown</div>
+        <div class="card-value" id="sim-mdd">—</div></div>
+  </div>
+  <div class="sim-layout">
+    <div class="sim-controls">
+      <div class="sim-buttons">
+        <button id="sim-btn-ini" type="button">Pesos iniciais</button>
+        <button id="sim-btn-opt" type="button">Pesos ótimos</button>
+        <button id="sim-btn-eq" type="button">Igualar (1/N)</button>
+        <button id="sim-btn-zero" type="button">Zerar</button>
+      </div>
+      {rows}
+    </div>
+    <div class="chart-wrap sim-chartwrap"><div id="sim-chart" style="height:420px;width:100%"></div></div>
+  </div>
+</section>
+{SIMULATOR_JS.replace("__SIM_JSON__", sim_json)}"""
+    return section
+
+
+def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics_df, summary_rows,
+               group_html="", simulator_html="", quotes_html=""):
     ms_r, ms_v, ms_s = mkt["max_sharpe"]["stats"]
     mv_r, mv_v, _    = mkt["min_vol"]["stats"]
     alloc_rows = ""
@@ -664,7 +1072,8 @@ def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics
         f'<div id="fig-{k}" class="chart-wrap">{v}</div></section>'
         for k, v in figures_html.items()
     )
-    nav_toc       = build_nav(list(figures_html.keys()))
+    nav_toc       = build_nav(list(figures_html.keys()), has_groups=bool(group_html),
+                              has_sim=bool(simulator_html), has_quotes=bool(quotes_html))
     summary_html  = build_summary_section(summary_rows, tickers, w_opt)
     glossary_html = build_glossary()
     back_to_top   = BACK_TO_TOP
@@ -716,6 +1125,37 @@ def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics
                      text-transform:uppercase;letter-spacing:.5px;text-align:center}}
   .summary-table td{{padding:8px 12px;text-align:center;font-size:.85rem;border-top:1px solid #2D3748}}
   .summary-note{{color:#8B949E;font-size:.75rem;margin-top:10px}}
+  .summary-section code{{background:#0D1117;border:1px solid #2D3748;border-radius:4px;
+                         padding:1px 5px;font-size:.85em;color:#FFA726}}
+  .range-cell{{min-width:180px;text-align:left}}
+  .range-bar{{position:relative;height:8px;border-radius:4px;margin:2px 0 4px;
+              background:linear-gradient(90deg,#EF5350 0%,#FFA726 50%,#26A69A 100%)}}
+  .range-dot{{position:absolute;top:-3px;width:4px;height:14px;background:#E6EDF3;border-radius:2px;
+              transform:translateX(-50%);box-shadow:0 0 3px rgba(0,0,0,.6)}}
+  .range-txt{{font-size:.72rem;color:#8B949E}}
+  .sim-periods{{display:flex;align-items:center;gap:6px;color:#8B949E;font-size:.8rem;flex-wrap:wrap}}
+  .sim-periods button{{background:#21262D;color:#8B949E;border:1px solid #2D3748;border-radius:14px;
+                       padding:4px 14px;cursor:pointer;font-size:.8rem;transition:.15s}}
+  .sim-periods button:hover{{color:#E6EDF3;border-color:#FF6F00}}
+  .sim-periods button.active{{background:#FF6F00;color:#0D1117;border-color:#FF6F00;font-weight:600}}
+  .sim-layout{{display:grid;grid-template-columns:340px 1fr;gap:20px;align-items:start}}
+  .sim-controls{{background:#0D1117;border:1px solid #2D3748;border-radius:10px;padding:14px 16px;
+                 max-height:520px;overflow-y:auto}}
+  .sim-buttons{{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px}}
+  .sim-buttons button{{flex:1 1 auto;background:#21262D;color:#E6EDF3;border:1px solid #2D3748;
+                       border-radius:6px;padding:6px 8px;font-size:.72rem;cursor:pointer;transition:.15s}}
+  .sim-buttons button:hover{{border-color:#FF6F00;color:#FF6F00}}
+  .sim-row{{display:grid;grid-template-columns:1fr 120px 52px;align-items:center;gap:10px;
+            padding:6px 0;border-top:1px solid #21262D}}
+  .sim-name{{font-size:.82rem;color:#E6EDF3}}
+  .sim-weight{{font-size:.8rem;color:#FF6F00;text-align:right;font-variant-numeric:tabular-nums}}
+  .sim-slider{{-webkit-appearance:none;appearance:none;height:5px;border-radius:3px;
+               background:#2D3748;outline:none;cursor:pointer}}
+  .sim-slider::-webkit-slider-thumb{{-webkit-appearance:none;appearance:none;width:15px;height:15px;
+               border-radius:50%;background:#FF6F00;cursor:pointer;border:2px solid #0D1117}}
+  .sim-slider::-moz-range-thumb{{width:15px;height:15px;border-radius:50%;background:#FF6F00;
+               cursor:pointer;border:2px solid #0D1117}}
+  .sim-chartwrap{{min-width:0}}
   .section-intro{{max-width:900px;margin:0 0 12px;color:#8B949E;font-size:.85rem;line-height:1.55}}
   .section-intro h2{{color:#E6EDF3;font-size:1rem;text-transform:none;letter-spacing:0;
                      margin-bottom:6px;font-weight:600}}
@@ -729,6 +1169,9 @@ def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics
                 background:#FF6F00;color:#0D1117;border:none;font-size:1.1rem;cursor:pointer;
                 display:none;align-items:center;justify-content:center;box-shadow:0 4px 12px rgba(0,0,0,.4);z-index:60}}
   #back-to-top.show{{display:flex}}
+  @media (max-width:900px){{
+    .sim-layout{{grid-template-columns:1fr}}
+  }}
   @media (max-width:640px){{
     header{{padding:24px 20px 20px}}
     .container{{padding:0 16px}}
@@ -755,6 +1198,7 @@ def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics
 {nav_toc}
 {summary_html}
   {summary_cards}
+  {quotes_html}
   <div class="alloc-section" id="tabela-alocacao">
     <h2>Alocação Ótima — Markowitz (Max Sharpe)</h2>
     <table>
@@ -762,6 +1206,8 @@ def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics
       <tbody>{alloc_rows}</tbody>
     </table>
   </div>
+  {group_html}
+  {simulator_html}
   {sections}
 </div>
 {glossary_html}
@@ -818,24 +1264,48 @@ def main():
     summary_rows = build_period_summary(prices, w_ini, w_opt, tickers)
 
     print("[4/5] Gerando gráficos...")
+    br_tickers = [t for t in tickers if t.endswith(".SA")]
+    us_tickers = [t for t in tickers if not t.endswith(".SA")]
+
     figs = {
         "frontier":       fig_frontier(mkt, prices, w_ini, w_opt, tickers),
         "allocation":     fig_allocation_pie(tickers, w_ini, w_opt),
         "equity":         fig_equity_periods(prices, w_ini, w_opt, tickers),
         "bar_returns":    fig_bar_returns(metrics_df),
-        "assets":         fig_individual_assets(prices, tickers),
+    }
+    # Separa a performance individual por país (BR / US); se só houver um grupo,
+    # mantém um único gráfico combinado.
+    if br_tickers and us_tickers:
+        figs["assets_br"] = fig_individual_assets(
+            prices, br_tickers, "🇧🇷 Ações Brasileiras — Últimos 12 Meses (base BRL)")
+        figs["assets_us"] = fig_individual_assets(
+            prices, us_tickers, "🇺🇸 Ações Americanas — Últimos 12 Meses (base BRL)")
+    else:
+        figs["assets"] = fig_individual_assets(prices, tickers)
+    figs.update({
         "drawdown":       fig_drawdown(prices, w_ini, w_opt, tickers),
         "rolling_sharpe": fig_rolling_sharpe(prices, w_ini, w_opt, tickers),
         "correlation":    fig_correlation(prices, tickers),
         "metrics_table":  fig_metrics_table(metrics_df),
-    }
+    })
+    group_html     = build_group_section(prices, tickers, w_ini, period="1A")
+    simulator_html = build_simulator(prices, tickers, w_ini, w_opt)
+    print("  buscando cotações (preço atual + 52 semanas)...")
+    try:
+        native = fetch_native_prices(tickers)
+        quotes_html = build_quotes_section(compute_quotes(native, tickers))
+    except Exception as e:
+        print(f"  ⚠ não consegui montar a tabela de cotações: {e}")
+        quotes_html = ""
     figs_html = {k: v.to_html(full_html=False,
                                include_plotlyjs="cdn" if k == list(figs.keys())[0] else False,
                                config={"responsive": True, "displayModeBar": True})
                  for k, v in figs.items()}
 
     print("[5/5] Montando HTML...")
-    html = build_html(figs_html, PORTFOLIO_NAME, tickers, w_ini, w_opt, mkt, metrics_df, summary_rows)
+    html = build_html(figs_html, PORTFOLIO_NAME, tickers, w_ini, w_opt, mkt, metrics_df,
+                      summary_rows, group_html=group_html, simulator_html=simulator_html,
+                      quotes_html=quotes_html)
     safe_name = PORTFOLIO_NAME.replace(" ", "_").replace("/", "-")
     out_path  = os.path.join(OUTPUT_DIR, f"portfolio_{safe_name}.html")
     with open(out_path, "w", encoding="utf-8") as f:

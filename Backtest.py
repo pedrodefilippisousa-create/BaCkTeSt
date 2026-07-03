@@ -85,6 +85,45 @@ THEME = dict(
     title_font_size=18,
 )
 
+# Tradução dos setores do Yahoo (inglês) para pt-BR
+SECTOR_PT = {
+    "Technology": "Tecnologia",
+    "Financial Services": "Financeiro",
+    "Financial": "Financeiro",
+    "Energy": "Energia",
+    "Basic Materials": "Materiais",
+    "Consumer Cyclical": "Consumo Cíclico",
+    "Consumer Defensive": "Consumo Básico",
+    "Industrials": "Industrial",
+    "Healthcare": "Saúde",
+    "Communication Services": "Comunicação",
+    "Utilities": "Utilidades",
+    "Real Estate": "Imobiliário",
+}
+
+# Reserva manual, usada quando o Yahoo não retorna o setor
+SECTORS_MANUAL = {
+    "ITUB4.SA": "Financeiro", "PETR4.SA": "Energia", "CXSE3.SA": "Seguros",
+    "VALE3.SA": "Materiais",  "AAPL": "Tecnologia", "MSFT": "Tecnologia",
+    "AMZN": "Consumo Cíclico", "CAT": "Industrial", "KMB": "Consumo Básico",
+    "ASML": "Tecnologia", "BRK-B": "Financeiro", "JPM": "Financeiro",
+}
+
+
+def fetch_sectors(tickers):
+    """Setor de cada ação: tenta o Yahoo (yfinance .info) e cai na reserva manual."""
+    out = {}
+    for t in tickers:
+        sector = None
+        try:
+            raw = yf.Ticker(t).info.get("sector")
+            if raw:
+                sector = SECTOR_PT.get(raw, raw)
+        except Exception:
+            sector = None
+        out[t] = sector or SECTORS_MANUAL.get(t, "Outros")
+    return out
+
 
 def is_brl_native(ticker):
     """True se o ticker já é cotado em BRL (não precisa conversão FX)."""
@@ -415,6 +454,32 @@ def fig_allocation_pie(tickers, w_ini, w_opt):
     return fig
 
 
+def fig_sector_allocation(tickers, w_ini, w_opt, sectors):
+    """Rosca da alocação por setor (inicial vs. otimizada)."""
+    def agg(weights):
+        d = {}
+        for t, w in zip(tickers, weights):
+            s = sectors.get(t, "Outros")
+            d[s] = d.get(s, 0) + w
+        return d
+    ai, ao = agg(w_ini), agg(w_opt)
+    labels = sorted(set(list(ai) + list(ao)), key=lambda s: -ai.get(s, 0))
+    palette = (px.colors.qualitative.Bold + px.colors.qualitative.Pastel)[:len(labels)]
+    fig = make_subplots(rows=1, cols=2, specs=[[{"type": "pie"}, {"type": "pie"}]],
+                        subplot_titles=["Carteira Inicial", "Markowitz (Max Sharpe)"])
+    for col, agg_w in [(1, ai), (2, ao)]:
+        fig.add_trace(go.Pie(labels=labels, values=[round(agg_w.get(l, 0)*100, 2) for l in labels],
+            marker=dict(colors=palette, line=dict(color="#0D1117", width=2)),
+            textinfo="label+percent", textposition="inside", insidetextorientation="horizontal",
+            hole=0.4, sort=False,
+            hovertemplate="%{label}<br>%{value:.1f}%<extra></extra>",
+            showlegend=True), row=1, col=col)
+    fig.update_layout(title="Alocação por Setor", **THEME, height=440,
+        margin=dict(t=70), uniformtext=dict(minsize=10, mode="hide"),
+        legend=dict(orientation="h", y=-0.05, bgcolor="rgba(0,0,0,0)"))
+    return fig
+
+
 def fig_metrics_table(metrics_df):
     fmt = {
         "Retorno Total":      lambda v: f"{v:+.1%}",
@@ -543,6 +608,9 @@ CHART_INTROS = {
     "allocation": ("Alocação da Carteira",
         "Distribuição dos pesos entre os ativos, comparando a carteira inicial com a otimizada de "
         "Máximo Sharpe — a mesma informação da tabela acima em formato visual."),
+    "sector_allocation": ("Alocação por Setor",
+        "Quanto da carteira está em cada setor (tecnologia, financeiro, energia...), na alocação inicial "
+        "e na otimizada. Setores muito grandes indicam concentração de risco."),
     "equity": ("Curvas de Equity por Período",
         "Retorno acumulado (%) ao longo do tempo da carteira inicial e da otimizada, comparado aos "
         "benchmarks, em cinco janelas históricas (6M, 1A, 3A, 5A, 10A)."),
@@ -574,7 +642,8 @@ CHART_INTROS = {
 
 # Rótulo curto de cada gráfico no menu de navegação (chave = id do fig)
 NAV_LABELS = {
-    "frontier": "Fronteira Eficiente", "allocation": "Alocação", "equity": "Equity",
+    "frontier": "Fronteira Eficiente", "allocation": "Alocação",
+    "sector_allocation": "Setores (gráfico)", "equity": "Equity",
     "bar_returns": "Retorno/Período", "assets": "Ativos",
     "assets_br": "Ativos BR", "assets_us": "Ativos US", "drawdown": "Drawdown",
     "rolling_sharpe": "Rolling Sharpe", "correlation": "Correlação", "metrics_table": "Métricas",
@@ -634,11 +703,13 @@ def build_period_summary(prices, w_ini, w_opt, tickers):
     return rows
 
 
-def build_nav(fig_keys, has_groups=False, has_sim=False, has_quotes=False):
+def build_nav(fig_keys, has_groups=False, has_sim=False, has_quotes=False, has_sectors=False):
     links = ['<a href="#resumo">Resumo</a>']
     if has_quotes:
         links.append('<a href="#cotacoes">💰 Cotações</a>')
     links.append('<a href="#tabela-alocacao">Alocação Ótima</a>')
+    if has_sectors:
+        links.append('<a href="#setores">🏭 Setores</a>')
     if has_groups:
         links.append('<a href="#grupos">Brasil × EUA</a>')
     if has_sim:
@@ -736,8 +807,9 @@ def fetch_native_prices(tickers, days=400):
     return close.dropna(how="all")
 
 
-def compute_quotes(native_prices, tickers):
+def compute_quotes(native_prices, tickers, sectors=None):
     """Preço atual e máx/mín de 52 semanas (moeda nativa) de cada ticker."""
+    sectors = sectors or {}
     rows = []
     corte = datetime.today() - timedelta(days=365)
     for t in tickers:
@@ -756,6 +828,7 @@ def compute_quotes(native_prices, tickers):
             "ticker": t,
             "origem": "BR" if t.endswith(".SA") else "US",
             "moeda": "R$" if t.endswith(".SA") else "US$",
+            "setor": sectors.get(t, ""),
             "atual": last, "min52": lo, "max52": hi,
             "pos": max(0.0, min(1.0, pos)),
             "vs_max": last / hi - 1 if hi else 0.0,
@@ -770,9 +843,10 @@ def build_quotes_section(rows):
     body = ""
     for r in rows:
         posp = r["pos"] * 100
+        setor_badge = f' <span class="mini sim-sector">{r["setor"]}</span>' if r.get("setor") else ""
         body += f"""
       <tr>
-        <td style="text-align:left"><b>{r['ticker']}</b> <span class="mini">{r['origem']}</span></td>
+        <td style="text-align:left"><b>{r['ticker']}</b> <span class="mini">{r['origem']}</span>{setor_badge}</td>
         <td><b>{_money(r['atual'], r['moeda'])}</b></td>
         <td>{_money(r['min52'], r['moeda'])}</td>
         <td>{_money(r['max52'], r['moeda'])}</td>
@@ -836,6 +910,77 @@ def build_group_section(prices, tickers, w_ini, period="1A"):
   <p class="summary-note">Sharpe em verde = acima de 1 (boa relação risco-retorno); laranja = entre 0 e 1;
   vermelho = negativo. A "carteira completa" costuma ter volatilidade menor que a média das partes graças
   à diversificação.</p>
+</section>"""
+
+
+def build_sector_stats(prices, tickers, w_ini, sectors, period="1A"):
+    """Rentabilidade/risco e peso de cada setor da carteira (mesmo período)."""
+    delta = PERIODS.get(period, PERIODS["1A"])
+    p = prices.loc[datetime.today() - delta:]
+    groups = {}
+    for i, t in enumerate(tickers):
+        groups.setdefault(sectors.get(t, "Outros"), []).append(i)
+    rows = []
+    for setor, idx in groups.items():
+        pr = subportfolio_returns(p, tickers, w_ini, idx)
+        if pr is None or len(pr) < 5:
+            continue
+        cum = cumulative(pr)
+        a_r, a_v, sh = annualized_stats(pr)
+        rows.append({
+            "setor": setor,
+            "ativos": [tickers[i] for i in idx],
+            "peso": float(sum(w_ini[i] for i in idx)),
+            "retorno_total": cum.iloc[-1] - 1,
+            "retorno_anual": a_r,
+            "volatilidade": a_v,
+            "sharpe": sh,
+            "max_drawdown": max_drawdown(cum),
+        })
+    rows.sort(key=lambda r: -r["peso"])
+    return rows
+
+
+def build_sector_section(prices, tickers, w_ini, sectors, period="1A"):
+    """Seção HTML comparando rentabilidade/risco/peso de cada setor da carteira."""
+    rows = build_sector_stats(prices, tickers, w_ini, sectors, period)
+    if not rows:
+        return ""
+    periodo_txt = PERIOD_LABELS.get(period, period)
+    best_ret = max(r["retorno_total"] for r in rows)
+    body = ""
+    for r in rows:
+        destaque = ' style="color:#26A69A"' if abs(r["retorno_total"] - best_ret) < 1e-12 else ""
+        sh_color = "#26A69A" if r["sharpe"] >= 1 else ("#FFA726" if r["sharpe"] >= 0 else "#EF5350")
+        ativos_txt = ", ".join(r["ativos"])
+        body += f"""
+      <tr>
+        <td style="text-align:left"><b>{r['setor']}</b>
+            <span class="mini" title="{ativos_txt}">{len(r['ativos'])} ativos</span></td>
+        <td><b>{_pct(r['peso'], signed=False)}</b></td>
+        <td{destaque}><b>{_pct(r['retorno_total'])}</b></td>
+        <td>{_pct(r['retorno_anual'])}</td>
+        <td>{_pct(r['volatilidade'], signed=False)}</td>
+        <td style="color:{sh_color}"><b>{r['sharpe']:.2f}</b></td>
+        <td style="color:#EF5350">{_pct(r['max_drawdown'])}</td>
+      </tr>"""
+    return f"""<section class="summary-section" id="setores">
+  <h2>🏭 Desempenho por Setor</h2>
+  <p>Cada ação foi classificada por setor (via Yahoo Finance). A tabela mostra o <b>peso</b> de cada
+  setor na carteira e como ele se comportou nos últimos {periodo_txt} (rentabilidade, risco e Sharpe).
+  Ajuda a enxergar a <b>concentração real</b> da carteira — às vezes ações de países diferentes estão
+  todas no mesmo setor.</p>
+  <table class="summary-table">
+    <thead><tr>
+      <th style="text-align:left">Setor</th><th>Peso</th><th>Retorno Total</th><th>Retorno Anualiz.</th>
+      <th>Volatilidade</th><th>Sharpe</th><th>Máx. Drawdown</th>
+    </tr></thead>
+    <tbody>{body}
+    </tbody>
+  </table>
+  <p class="summary-note">Peso = fração da carteira inicial no setor. Passe o mouse sobre "N ativos" para
+  ver quais ações compõem cada setor. Veja também o gráfico de <a href="#fig-sector_allocation">alocação
+  por setor</a> abaixo.</p>
 </section>"""
 
 
@@ -963,7 +1108,7 @@ SIMULATOR_JS = r"""
 """
 
 
-def build_simulator(prices, tickers, w_ini, w_opt):
+def build_simulator(prices, tickers, w_ini, w_opt, sectors=None):
     """Painel interativo: sliders de peso recalculando retorno/risco/Sharpe/curva no navegador."""
     avail_bench = [b for b in BENCHMARKS if b in prices.columns]
     rets = prices[tickers + avail_bench].pct_change().dropna()
@@ -983,12 +1128,15 @@ def build_simulator(prices, tickers, w_ini, w_opt):
     sim_json = json.dumps(data, ensure_ascii=False)
 
     rows = ""
+    sectors = sectors or {}
     for t, wi in zip(tickers, w_ini):
         origem = "BR" if t.endswith(".SA") else "US"
         cid = _css_id(t)
+        setor = sectors.get(t, "")
+        setor_badge = f'<span class="mini sim-sector">{setor}</span>' if setor else ""
         rows += f"""
         <div class="sim-row">
-          <span class="sim-name">{t} <span class="mini">{origem}</span></span>
+          <span class="sim-name">{t} <span class="mini">{origem}</span>{setor_badge}</span>
           <input type="range" min="0" max="100" step="1" value="{round(wi*100)}"
                  id="slider-{cid}" class="sim-slider" aria-label="Peso de {t}">
           <span class="sim-weight" id="w-{cid}">{wi*100:.1f}%</span>
@@ -1036,7 +1184,7 @@ def build_simulator(prices, tickers, w_ini, w_opt):
 
 
 def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics_df, summary_rows,
-               group_html="", simulator_html="", quotes_html=""):
+               group_html="", simulator_html="", quotes_html="", sector_html=""):
     ms_r, ms_v, ms_s = mkt["max_sharpe"]["stats"]
     mv_r, mv_v, _    = mkt["min_vol"]["stats"]
     alloc_rows = ""
@@ -1073,7 +1221,8 @@ def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics
         for k, v in figures_html.items()
     )
     nav_toc       = build_nav(list(figures_html.keys()), has_groups=bool(group_html),
-                              has_sim=bool(simulator_html), has_quotes=bool(quotes_html))
+                              has_sim=bool(simulator_html), has_quotes=bool(quotes_html),
+                              has_sectors=bool(sector_html))
     summary_html  = build_summary_section(summary_rows, tickers, w_opt)
     glossary_html = build_glossary()
     back_to_top   = BACK_TO_TOP
@@ -1148,6 +1297,7 @@ def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics
   .sim-row{{display:grid;grid-template-columns:1fr 120px 52px;align-items:center;gap:10px;
             padding:6px 0;border-top:1px solid #21262D}}
   .sim-name{{font-size:.82rem;color:#E6EDF3}}
+  .sim-sector{{background:#1F2A44;color:#7FB2FF;border:1px solid #2D3E63}}
   .sim-weight{{font-size:.8rem;color:#FF6F00;text-align:right;font-variant-numeric:tabular-nums}}
   .sim-slider{{-webkit-appearance:none;appearance:none;height:5px;border-radius:3px;
                background:#2D3748;outline:none;cursor:pointer}}
@@ -1207,6 +1357,7 @@ def build_html(figures_html, portfolio_name, tickers, w_ini, w_opt, mkt, metrics
     </table>
   </div>
   {group_html}
+  {sector_html}
   {simulator_html}
   {sections}
 </div>
@@ -1263,15 +1414,19 @@ def main():
     metrics_df   = build_metrics(prices, w_ini, w_opt, tickers)
     summary_rows = build_period_summary(prices, w_ini, w_opt, tickers)
 
+    print("  buscando setores dos ativos...")
+    sectors = fetch_sectors(tickers)
+
     print("[4/5] Gerando gráficos...")
     br_tickers = [t for t in tickers if t.endswith(".SA")]
     us_tickers = [t for t in tickers if not t.endswith(".SA")]
 
     figs = {
-        "frontier":       fig_frontier(mkt, prices, w_ini, w_opt, tickers),
-        "allocation":     fig_allocation_pie(tickers, w_ini, w_opt),
-        "equity":         fig_equity_periods(prices, w_ini, w_opt, tickers),
-        "bar_returns":    fig_bar_returns(metrics_df),
+        "frontier":         fig_frontier(mkt, prices, w_ini, w_opt, tickers),
+        "allocation":       fig_allocation_pie(tickers, w_ini, w_opt),
+        "sector_allocation": fig_sector_allocation(tickers, w_ini, w_opt, sectors),
+        "equity":           fig_equity_periods(prices, w_ini, w_opt, tickers),
+        "bar_returns":      fig_bar_returns(metrics_df),
     }
     # Separa a performance individual por país (BR / US); se só houver um grupo,
     # mantém um único gráfico combinado.
@@ -1289,11 +1444,12 @@ def main():
         "metrics_table":  fig_metrics_table(metrics_df),
     })
     group_html     = build_group_section(prices, tickers, w_ini, period="1A")
-    simulator_html = build_simulator(prices, tickers, w_ini, w_opt)
+    sector_html    = build_sector_section(prices, tickers, w_ini, sectors, period="1A")
+    simulator_html = build_simulator(prices, tickers, w_ini, w_opt, sectors)
     print("  buscando cotações (preço atual + 52 semanas)...")
     try:
         native = fetch_native_prices(tickers)
-        quotes_html = build_quotes_section(compute_quotes(native, tickers))
+        quotes_html = build_quotes_section(compute_quotes(native, tickers, sectors))
     except Exception as e:
         print(f"  ⚠ não consegui montar a tabela de cotações: {e}")
         quotes_html = ""
@@ -1305,7 +1461,7 @@ def main():
     print("[5/5] Montando HTML...")
     html = build_html(figs_html, PORTFOLIO_NAME, tickers, w_ini, w_opt, mkt, metrics_df,
                       summary_rows, group_html=group_html, simulator_html=simulator_html,
-                      quotes_html=quotes_html)
+                      quotes_html=quotes_html, sector_html=sector_html)
     safe_name = PORTFOLIO_NAME.replace(" ", "_").replace("/", "-")
     out_path  = os.path.join(OUTPUT_DIR, f"portfolio_{safe_name}.html")
     with open(out_path, "w", encoding="utf-8") as f:

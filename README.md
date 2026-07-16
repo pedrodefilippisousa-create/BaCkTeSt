@@ -1,27 +1,40 @@
-# Portfolio Backtest — Dashboard HTML Interativo
+# Diversificação Setorial B3 — Backtest Unificado
 
-Backtest e otimização de carteira de investimentos que gera um **relatório HTML
-autocontido** (com gráficos interativos via [Plotly](https://plotly.com/python/)).
-Suporta ativos brasileiros (`.SA`) e americanos na mesma carteira, convertendo
-tudo para BRL, e compara a alocação inicial com uma carteira otimizada por
-**Markowitz** contra dois benchmarks de mercado (IBOV e S&P 500).
+Backtest de **diversificação entre setores da B3** que gera um **relatório HTML
+autocontido** (gráficos interativos via [Plotly](https://plotly.com/python/),
+tema escuro). Compara quatro estratégias de alocação num backtest
+**walk-forward out-of-sample**, medindo o desempenho contra o **Ibovespa**.
+Dados 100% via Yahoo Finance — apenas ativos brasileiros.
+
+Cada setor é um índice sintético = cesta das ações líderes do setor, ponderada
+pelo valor de mercado (market cap) atual.
+
+## Estratégias comparadas (out-of-sample)
+
+- **Markowitz — Máximo Sharpe**
+- **Markowitz — Mínima Variância**
+- **Equal-Weight (1/N)**
+- **Risk Parity** (paridade de risco)
+- **Ibovespa** (benchmark)
 
 ## Arquivos
 
 | Arquivo | Descrição |
 |---------|-----------|
-| `Backtest.py` | Script gerador: baixa os dados, roda a otimização e produz o HTML |
-| `portfolio_Carteira_Mista_BR-US.html` | Exemplo de relatório gerado |
+| `Backtest.py` | Script gerador: baixa os dados, roda o backtest e produz o HTML |
+| `Atualizar e abrir relatorio.command` | Atalho para Mac: atualiza os dados e abre o relatório |
+| `COMO_RODAR.md` | Passo a passo para rodar no Mac |
 
 ## O que o relatório mostra
 
-- **Resumo executivo** com tabela de retorno por período (carteira inicial vs. otimizada vs. IBOV vs. SPY)
-- **Alocação ótima** (Markowitz — Máximo Sharpe): pesos iniciais vs. ótimos
-- **Fronteira eficiente** de Markowitz (simulação Monte Carlo)
-- **Curvas de equity** por período (6M, 1A, 3A, 5A, 10A)
-- **Retorno total** por período e **performance individual** dos ativos
-- **Drawdown**, **Rolling Sharpe** (252 dias) e **matriz de correlação**
-- **Tabela de métricas**: retorno, volatilidade, Sharpe, Sortino, VaR/CVaR, Calmar, Max Drawdown
+- **Resumo executivo** com tabela de retorno por período e por estratégia
+- **Alocação recomendada** por estratégia (última janela)
+- **🎚️ Simulador de carteira setorial** interativo (sliders por setor, recálculo ao vivo)
+- **Curvas de equity** out-of-sample e **retorno por estratégia**
+- **Tabela de métricas** (retorno, volatilidade, Sharpe, Sortino, drawdown...)
+- **Fronteira eficiente**, **alocação**, **drawdown**, **rolling Sharpe**
+- **Matriz de correlação** entre setores e **composição** de cada setor
+- **💰 Cotações**: preço atual e máxima/mínima de 52 semanas de cada ação (em R$)
 - Menu de navegação, glossário e layout responsivo
 
 ## Requisitos
@@ -41,9 +54,9 @@ pip install -r requirements.txt
 python Backtest.py
 ```
 
-O script baixa os dados, roda a otimização e salva um arquivo
-`portfolio_<NOME_DA_CARTEIRA>.html` na pasta atual, abrindo-o automaticamente
-no navegador.
+O script baixa os dados, roda o backtest e salva `setores_b3_dashboard.html`
+na pasta atual, abrindo-o automaticamente no navegador. No Mac, você também pode
+dar dois cliques em `Atualizar e abrir relatorio.command`.
 
 ## Configuração
 
@@ -51,34 +64,30 @@ Toda a configuração fica no topo do `Backtest.py` (bloco `CONFIGURAÇÃO`) —
 preciso mexer no resto do código:
 
 ```python
-PORTFOLIO = {
-    # Brasil (preços já em BRL) — sufixo .SA
-    "ITUB4.SA": 0.10,
-    "PETR4.SA": 0.10,
-    # EUA (convertidos para BRL via USDBRL=X) — ticker puro
-    "AAPL": 0.10,
-    "MSFT": 0.10,
-    # ...
+SECTORS = {
+    "Financeiro":       ["ITUB4", "BBDC4", "BBAS3", "B3SA3", ...],
+    "Petróleo e Gás":   ["PETR4", "PETR3", "PRIO3", ...],
+    # ... adicione/remova setores e ações livremente (tickers B3, sem .SA)
 }
 
-PORTFOLIO_NAME = "Carteira Mista BR-US"
-BENCHMARKS     = ["^BVSP", "SPY"]   # IBOV + SPY
-BASE_CURRENCY  = "BRL"              # moeda base do relatório
-FX_TICKER      = "USDBRL=X"         # taxa USD -> BRL
-RISK_FREE_RATE = 0.1075             # taxa livre de risco a.a. (ex.: Selic)
-N_PORTFOLIOS   = 6_000             # nº de simulações Monte Carlo
-OUTPUT_DIR     = "."               # pasta de saída do HTML
+BENCHMARK        = "^BVSP"     # Ibovespa
+RISK_FREE_RATE   = 0.1425      # taxa livre de risco a.a. (Selic/CDI aprox.)
+YEARS_HISTORY    = 10          # histórico total baixado
+LOOKBACK_YEARS   = 3           # janela de estimação no walk-forward
+REBALANCE_MONTHS = 1           # rebalanceia a cada N meses
+MAX_WEIGHT       = 0.30        # teto por setor na otimização
+N_PORTFOLIOS     = 8_000       # nuvem Monte Carlo p/ fronteira eficiente
 ```
 
 Notas:
 
-- Os **pesos não precisam somar 1** — o script normaliza automaticamente.
-- Tickers **BR** usam o sufixo `.SA` (ex.: `PETR4.SA`); tickers **US** são o
-  ticker puro (ex.: `AAPL`). A classe B da Berkshire no Yahoo é `BRK-B`.
-- Ativos sem dados disponíveis são ignorados com um aviso.
+- Os tickers são da **B3 sem o sufixo `.SA`** (ex.: `PETR4`, `VALE3`) — o script
+  adiciona o `.SA` automaticamente.
+- Ações sem dados no Yahoo são ignoradas com um aviso.
+- `MAX_WEIGHT` evita que a otimização concentre tudo em um único setor.
 
 ## Aviso
 
-Este projeto é apenas para fins educacionais e de estudo. A otimização de
-Markowitz é ajustada com dados históricos e **não garante desempenho futuro**
-(risco de *overfitting*). Nada aqui constitui recomendação de investimento.
+Este projeto é apenas para fins educacionais e de estudo. As estratégias são
+ajustadas com dados históricos e **não garantem desempenho futuro** (risco de
+*overfitting*). Nada aqui constitui recomendação de investimento.
